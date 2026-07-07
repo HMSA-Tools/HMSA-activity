@@ -12,6 +12,10 @@ const SS_LABEL   = { unclaimed: "Unclaimed", pending: "Pending", active: "Active
 const ACT_ST     = { pending: "Pending approval", approved: "Approved" };
 const RTYPE_LABEL = { customer: "Customer Meeting", internal: "Internal" };
 let TAGS = [];        // tag catalog (created by leaders/director)
+let PARTS = [];       // parts catalog (managed by admin) — {id, name, color}
+const PART_PALETTE = ["#00a651", "#2e7cf6", "#f0a020", "#9b59d0", "#e5568c", "#12a5a5", "#e2574c", "#5a6b7d"];
+const partColor = (name) => PARTS.find((p) => p.name === name)?.color || "#5a6b7d";
+const partBadge = (name) => { const c = partColor(name); return `<span class="badge" style="background:${c}1c;color:${c};border:1px solid ${c}44">${esc(name)}</span>`; };
 let repTagFilter = 0; // 0 = all
 const isManager = () => ME && (ME.role === "leader" || ME.role === "director" || ME.is_admin);
 const halfKey = (d = new Date()) => `${d.getFullYear()}-H${d.getMonth() < 6 ? 1 : 2}`;
@@ -116,6 +120,8 @@ async function afterLogin() {
   STAFF = all || [];
   const { data: tagRows } = await sb.from("tag_defs").select("*").order("name");
   TAGS = tagRows || [];
+  const { data: partRowsG } = await sb.from("parts").select("*").order("name");
+  PARTS = partRowsG || [];
 
   $("#auth").style.display = "none"; $("#app").style.display = "block";
   $("#meName").textContent = ME.name; $("#mePart").textContent = ME.part;
@@ -258,7 +264,7 @@ async function renderDashboard() {
     reviewHTML = `
       <div style="font-size:26px;font-weight:800">${list.length} <span style="font-size:12.5px;font-weight:600;color:var(--ink-2)">awaiting review${list.length && oldest >= 3 ? ` · oldest ${oldest}d ⚠️` : list.length ? ` · oldest ${oldest}d` : ""}</span></div>
       ${list.slice(0, 3).map((x) => `<div class="rev-item" data-rev="${x.id}" style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)">
-        📄 ${esc(x.title)} <span class="badge part">${esc(x.part)}</span> <span style="color:var(--ink-2)">${esc(staffName(x.author_id))}</span></div>`).join("")}
+        📄 ${esc(x.title)} ${partBadge(x.part)} <span style="color:var(--ink-2)">${esc(staffName(x.author_id))}</span></div>`).join("")}
       ${list.length > 3 ? `<div style="font-size:11.5px;color:var(--ink-2);margin-top:4px">+${list.length - 3} more in Review Inbox</div>` : ""}`;
   } else {
     const { data: mine } = await sb.from("reports").select("status").eq("author_id", ME.id);
@@ -295,7 +301,7 @@ async function renderDashboard() {
           </div>
           <table><thead><tr><th>Part</th><th>Meeting</th><th>VC</th><th>Trip</th><th>Other</th></tr></thead><tbody>
           ${Object.entries(byPart).map(([p, v]) => `<tr>
-            <td><span class="badge part">${esc(p)}</span></td>
+            <td>${partBadge(p)}</td>
             <td>${v.meeting}${gauge(p, "meeting")}</td>
             <td>${v.vc}${gauge(p, "vc")}</td>
             <td>${v.trip}${v.trip_days ? ` <span style="font-size:11px;color:var(--ink-2)">/ ${v.trip_days}d</span>` : ""}${gauge(p, "trip")}</td>
@@ -310,7 +316,7 @@ async function renderDashboard() {
     <div class="card" style="padding:8px 14px">
       <table><thead><tr><th>Name</th><th>Part</th><th>Meeting</th><th>VC</th><th>Trip (count / days)</th><th>Other</th><th>Total</th></tr></thead><tbody>
       ${people.map((p) => `<tr><td><b>${esc(p.name)}</b>${p.role !== "member" ? ` <span style="font-size:11px;color:var(--ink-2)">${ROLE_LABEL[p.role]}</span>` : ""}</td>
-        <td><span class="badge part">${esc(p.part)}</span></td>
+        <td>${partBadge(p.part)}</td>
         <td>${p.c.meeting || 0}</td><td>${p.c.vc || 0}</td>
         <td>${p.c.trip || 0}${p.trip_days ? ` <span style="color:var(--ink-2);font-size:11.5px">/ ${p.trip_days}d</span>` : ""}</td>
         <td>${p.c.other || 0}</td>
@@ -339,8 +345,8 @@ async function renderDashboard() {
 }
 
 async function targetsModal() {
-  const parts = [...new Set(STAFF.filter((x) => x.status === "active").map((x) => x.part))];
-  const myParts = ME.role === "leader" && !ME.is_admin && ME.role !== "director" ? [ME.part] : parts;
+  const parts = PARTS.length ? PARTS.map((p) => p.name) : [...new Set(STAFF.map((x) => x.part))];
+  const myParts = ME.role === "leader" && !ME.is_admin ? [ME.part] : parts;
   const y = new Date().getFullYear();
   const halves = [`${y}-H1`, `${y}-H2`, `${y + 1}-H1`];
   openModal(`
@@ -537,7 +543,7 @@ async function drawReportList(sel, onlySubmitted = false) {
         ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join(" ")}</td>
       <td><b>${esc(r.customer)}</b></td>
       <td>${esc(r.title)}</td>
-      <td>${esc(staffName(r.author_id))} <span class="badge part">${esc(r.part)}</span></td>
+      <td>${esc(staffName(r.author_id))} ${partBadge(r.part)}</td>
       <td>v${r.version}</td>
       <td><span class="badge ${r.status}">${ST_LABEL[r.status]}</span></td>
     </tr>`).join("");
@@ -810,12 +816,25 @@ async function renderAdmin() {
         <td><button class="btn sm" data-appr="${s.id}">Approve</button> <button class="btn ghost sm" data-rej="${s.id}">Reject</button></td></tr>`).join("")}
       </tbody></table></div>` : ""}
 
+    <div class="section-head"><h2>🎨 Parts</h2><button class="btn" id="btnAddPart">+ New part</button></div>
+    <div class="card" style="margin-bottom:8px;padding:12px 14px">
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        ${PARTS.map((p) => `
+          <span class="chip" style="background:${p.color}1c;color:${p.color};border:1px solid ${p.color}44">
+            ● ${esc(p.name)}
+            <button data-editpart="${p.id}" title="Edit" style="color:${p.color}">✎</button>
+            ${!STAFF.some((x) => x.part === p.name) ? `<button data-delpart="${p.id}" title="Delete" style="color:${p.color}">×</button>` : ""}
+          </span>`).join("") || `<span style="font-size:12.5px;color:var(--ink-2)">No parts yet — create one to use in the roster.</span>`}
+      </div>
+      <div style="font-size:11px;color:var(--ink-2);margin-top:8px">Parts with assigned staff can't be deleted. Renaming a part updates all staff and history automatically.</div>
+    </div>
+
     <div class="section-head"><h2>Staff roster</h2><button class="btn" id="btnAddStaff">+ Add staff</button></div>
     <div class="card" style="padding:8px 14px">
       <table><thead><tr><th>Name</th><th>Emp. No.</th><th>Part</th><th>Role</th><th>Status</th><th>Login ID</th><th></th></tr></thead><tbody>
       ${rest.map((s) => `<tr>
         <td><b>${esc(s.name)}</b>${s.is_admin ? ' <span style="font-size:11px;color:var(--green-dark)">Admin</span>' : ""}</td>
-        <td>${esc(s.emp_no)}</td><td><span class="badge part">${esc(s.part)}</span></td>
+        <td>${esc(s.emp_no)}</td><td>${partBadge(s.part)}</td>
         <td>${ROLE_LABEL[s.role]}</td>
         <td><span class="badge ${s.status}">${SS_LABEL[s.status]}</span></td>
         <td>${esc(s.login_id || "-")}</td>
@@ -829,6 +848,14 @@ async function renderAdmin() {
       </tbody></table></div>`;
 
   $("#btnAddStaff").onclick = () => staffModal();
+  $("#btnAddPart").onclick = () => partModal();
+  document.querySelectorAll("[data-editpart]").forEach((b) => (b.onclick = () => partModal(PARTS.find((p) => p.id == b.dataset.editpart))));
+  document.querySelectorAll("[data-delpart]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Delete this part?")) return;
+    await sb.from("parts").delete().eq("id", b.dataset.delpart);
+    PARTS = PARTS.filter((p) => p.id != b.dataset.delpart);
+    renderAdmin();
+  }));
   $("#btnToggleIndiv").onclick = async () => {
     const { error } = await sb.from("app_settings").update({ value: showIndiv ? "false" : "true" }).eq("key", "show_individual_stats");
     if (error) return alert("Failed to update setting: " + error.message);
@@ -874,6 +901,52 @@ function resetPwModal(s2) {
   };
 }
 
+function partModal(edit = null) {
+  let chosen = edit?.color || PART_PALETTE[PARTS.length % PART_PALETTE.length];
+  openModal(`
+    <h3>${edit ? "Edit part" : "New part"}</h3>
+    <div class="field"><label>Part name</label><input id="ptName" value="${esc(edit?.name || "")}" placeholder="e.g. Parts Sales" /></div>
+    <div class="field"><label>Color</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap" id="ptSwatches">
+        ${PART_PALETTE.map((c) => `<span data-c="${c}" style="width:30px;height:30px;border-radius:50%;background:${c};cursor:pointer;display:inline-block;border:3px solid ${c === chosen ? "var(--navy)" : "transparent"}"></span>`).join("")}
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="ptSave">${edit ? "Save" : "Create"}</button>
+    </div>`);
+  document.querySelectorAll("#ptSwatches [data-c]").forEach((sw) => (sw.onclick = () => {
+    chosen = sw.dataset.c;
+    document.querySelectorAll("#ptSwatches [data-c]").forEach((x) => (x.style.border = "3px solid transparent"));
+    sw.style.border = "3px solid var(--navy)";
+  }));
+  $("#ptSave").onclick = async () => {
+    const name = $("#ptName").value.trim();
+    if (!name) return alert("Enter a part name.");
+    if (edit) {
+      const { error } = await sb.from("parts").update({ name, color: chosen }).eq("id", edit.id);
+      if (error) return alert("Save failed (duplicate name?): " + error.message);
+      if (name !== edit.name) {
+        // rename cascade: staff + history + targets
+        await sb.from("staff").update({ part: name }).eq("part", edit.name);
+        await sb.from("activities").update({ part: name }).eq("part", edit.name);
+        await sb.from("reports").update({ part: name }).eq("part", edit.name);
+        await sb.from("targets").update({ part: name }).eq("part", edit.name);
+        const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin").order("part").order("name");
+        STAFF = all || [];
+        if (ME.part === edit.name) ME.part = name;
+      }
+      const i = PARTS.findIndex((p) => p.id === edit.id);
+      PARTS[i] = { ...PARTS[i], name, color: chosen };
+    } else {
+      const { data, error } = await sb.from("parts").insert({ name, color: chosen }).select("*").single();
+      if (error) return alert("Create failed (duplicate name?): " + error.message);
+      PARTS.push(data); PARTS.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    closeModal(); renderAdmin();
+  };
+}
+
 function staffModal(edit = null) {
   openModal(`
     <h3>${edit ? "Edit staff" : "Add staff"}</h3>
@@ -882,7 +955,11 @@ function staffModal(edit = null) {
       <div class="field"><label>Employee No.</label><input id="stEmp" value="${esc(edit?.emp_no || "")}" /></div>
     </div>
     <div class="row2">
-      <div class="field"><label>Part</label><input id="stPart" value="${esc(edit?.part || "")}" placeholder="e.g. Parts Sales" /></div>
+      <div class="field"><label>Part</label><select id="stPart">
+        ${PARTS.map((p) => `<option value="${esc(p.name)}" ${edit?.part === p.name ? "selected" : ""}>${esc(p.name)}</option>`).join("")}
+        ${edit?.part && !PARTS.some((p) => p.name === edit.part) ? `<option selected>${esc(edit.part)}</option>` : ""}
+      </select>
+      <div style="font-size:11px;color:var(--ink-2);margin-top:3px">Need a new part? Create it in Admin → Parts first.</div></div>
       <div class="field"><label>Role</label><select id="stRole">
         ${Object.entries(ROLE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.role === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
     </div>
@@ -892,7 +969,7 @@ function staffModal(edit = null) {
     </div>`);
   $("#stSave").onclick = async () => {
     const rec = { name: $("#stName").value.trim(), emp_no: $("#stEmp").value.trim(),
-      part: $("#stPart").value.trim() || "Unassigned", role: $("#stRole").value };
+      part: $("#stPart").value || "Unassigned", role: $("#stRole").value };
     if (!rec.name || !rec.emp_no) return alert("Name and employee number are required.");
     const { error } = edit
       ? await sb.from("staff").update(rec).eq("id", edit.id)
