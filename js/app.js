@@ -49,6 +49,15 @@ async function init() {
   if (session) await afterLogin();
 }
 
+async function doLogin() {
+  clearAuthMsg();
+  const id = $("#liId").value.trim(), pw = $("#liPw").value;
+  if (!id || !pw) return authMsg("Enter your login ID and password.");
+  const { error } = await sb.auth.signInWithPassword({ email: idEmail(id), password: pw });
+  if (error) return authMsg("Sign-in failed: check your login ID or password.");
+  await afterLogin();
+}
+
 async function showSignup() {
   clearAuthMsg(); showOnly("signupView");
   const sel = $("#suStaff");
