@@ -9,6 +9,14 @@ const TYPE_COLOR = { meeting: "#00a651", vc: "#2e7cf6", trip: "#f0a020", other: 
 const ROLE_LABEL = { member: "Member", leader: "Part Leader", director: "Director" };
 const ST_LABEL   = { draft: "Draft", submitted: "Submitted", returned: "Returned", approved: "Approved" };
 const SS_LABEL   = { unclaimed: "Unclaimed", pending: "Pending", active: "Active", disabled: "Disabled" };
+const ACT_ST     = { pending: "Pending approval", approved: "Approved" };
+const RTYPE_LABEL = { customer: "Customer Meeting", internal: "Internal" };
+let TAGS = [];        // tag catalog (created by leaders/director)
+let repTagFilter = 0; // 0 = all
+const isManager = () => ME && (ME.role === "leader" || ME.role === "director" || ME.is_admin);
+const halfKey = (d = new Date()) => `${d.getFullYear()}-H${d.getMonth() < 6 ? 1 : 2}`;
+const halfRange = (key) => { const [y, h] = key.split("-H"); return h === "1" ? { from: `${y}-01-01`, to: `${y}-06-30` } : { from: `${y}-07-01`, to: `${y}-12-31` }; };
+const canReviewActivity = (a) => (ME.role === "leader" && a.part === ME.part) || ME.role === "director" || ME.is_admin;
 
 let ME = null, STAFF = [], currentView = "dashboard", charts = [], openedReportId = null;
 
@@ -106,6 +114,8 @@ async function afterLogin() {
   ME = me;
   const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin").order("part").order("name");
   STAFF = all || [];
+  const { data: tagRows } = await sb.from("tag_defs").select("*").order("name");
+  TAGS = tagRows || [];
 
   $("#auth").style.display = "none"; $("#app").style.display = "block";
   $("#meName").textContent = ME.name; $("#mePart").textContent = ME.part;
@@ -182,74 +192,189 @@ function bindPeriodBar(rerender) {
 async function renderDashboard() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Dashboard</div>
-    <div class="page-sub">Sales activity by employee · ${esc(CONFIG.COMPANY_NAME)}</div>
+    <div class="page-sub">Approved activities only · ${esc(CONFIG.COMPANY_NAME)}</div>
     ${periodBarHTML()}<div id="dashBody" class="empty">Loading...</div>`;
   bindPeriodBar(renderDashboard);
 
   const r = getRange();
-  const { data, error } = await sb.rpc("activity_stats", { p_from: r.from, p_to: r.to });
-  if (error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
+  const hk = halfKey(), hr = halfRange(hk);
+  const [compQ, partQ, indivQ, targetQ, halfPartQ] = await Promise.all([
+    sb.rpc("company_stats", { p_from: r.from, p_to: r.to }),
+    sb.rpc("part_stats", { p_from: r.from, p_to: r.to }),
+    sb.rpc("activity_stats", { p_from: r.from, p_to: r.to }),
+    sb.from("targets").select("*").eq("half", hk),
+    sb.rpc("part_stats", { p_from: hr.from, p_to: hr.to }),
+  ]);
+  if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
+  const comp = compQ.data || [], partRows = partQ.data || [], indiv = indivQ.data || [];
+  const targets = targetQ.data || [], halfPart = halfPartQ.data || [];
+  const types = ["meeting", "vc", "trip", "other"];
 
-  const byStaff = {}; const totals = { meeting: 0, vc: 0, trip: 0, other: 0 };
-  (data || []).forEach((row) => {
-    if (!byStaff[row.staff_id]) byStaff[row.staff_id] = { name: row.name, part: row.part, role: row.role, hosted: {}, joined: {}, total: 0 };
-    byStaff[row.staff_id].hosted[row.a_type] = Number(row.hosted);
-    byStaff[row.staff_id].joined[row.a_type] = Number(row.joined);
-    byStaff[row.staff_id].total += Number(row.hosted) + Number(row.joined);
-    totals[row.a_type] += Number(row.hosted);
+  // ----- company KPI -----
+  const cTot = {}; let cTripDays = 0;
+  types.forEach((t) => (cTot[t] = 0));
+  comp.forEach((row) => { cTot[row.a_type] = Number(row.cnt); if (row.a_type === "trip") cTripDays = Number(row.trip_days); });
+  const grand = types.reduce((a, t) => a + cTot[t], 0);
+
+  // ----- part table -----
+  const byPart = {};
+  partRows.forEach((row) => {
+    if (!byPart[row.part]) byPart[row.part] = { meeting: 0, vc: 0, trip: 0, other: 0, trip_days: 0 };
+    byPart[row.part][row.a_type] = Number(row.cnt);
+    if (row.a_type === "trip") byPart[row.part].trip_days = Number(row.trip_days);
+  });
+  // half-to-date actuals for target gauges
+  const halfActual = {};
+  halfPart.forEach((row) => { halfActual[`${row.part}|${row.a_type}`] = Number(row.cnt); });
+  const tgt = {};
+  targets.forEach((t) => { tgt[`${t.part}|${t.a_type}`] = t.target; });
+  const gauge = (part, type) => {
+    const target = tgt[`${part}|${type}`];
+    if (!target) return "";
+    const actual = halfActual[`${part}|${type}`] || 0;
+    const pct = Math.min(100, Math.round((actual / target) * 100));
+    const col = pct >= 100 ? "var(--green)" : pct >= 60 ? "var(--blue)" : "var(--amber)";
+    return `<div style="margin-top:3px"><div style="font-size:10.5px;color:var(--ink-2)">${actual}/${target} (${hk})</div>
+      <div style="height:4px;background:#e8edf2;border-radius:2px"><div style="height:4px;width:${pct}%;background:${col};border-radius:2px"></div></div></div>`;
+  };
+
+  // ----- individual (may be empty when hidden for members) -----
+  const byStaff = {};
+  indiv.forEach((row) => {
+    if (!byStaff[row.staff_id]) byStaff[row.staff_id] = { name: row.name, part: row.part, role: row.role, c: {}, trip_days: 0, total: 0 };
+    byStaff[row.staff_id].c[row.a_type] = Number(row.cnt);
+    byStaff[row.staff_id].total += Number(row.cnt);
+    if (row.a_type === "trip") byStaff[row.staff_id].trip_days = Number(row.trip_days);
   });
   const people = Object.entries(byStaff).map(([id, v]) => ({ id: Number(id), ...v })).sort((a, b) => b.total - a.total);
-  const grand = totals.meeting + totals.vc + totals.trip + totals.other;
+  const showIndiv = people.length > 0;
 
-  const byPart = {};
-  people.forEach((p) => {
-    if (!byPart[p.part]) byPart[p.part] = { meeting: 0, vc: 0, trip: 0, other: 0 };
-    ["meeting", "vc", "trip", "other"].forEach((tp) => (byPart[p.part][tp] += p.hosted[tp] || 0));
-  });
+  // ----- review widget data -----
+  let reviewHTML = "";
+  if (isManager()) {
+    const { data: subs } = await sb.from("reports").select("id,title,part,updated_at,author_id").eq("status", "submitted").order("updated_at");
+    const list = subs || [];
+    const oldest = list.length ? Math.floor((Date.now() - new Date(list[0].updated_at)) / 86400000) : 0;
+    reviewHTML = `
+      <div style="font-size:26px;font-weight:800">${list.length} <span style="font-size:12.5px;font-weight:600;color:var(--ink-2)">awaiting review${list.length && oldest >= 3 ? ` · oldest ${oldest}d ⚠️` : list.length ? ` · oldest ${oldest}d` : ""}</span></div>
+      ${list.slice(0, 3).map((x) => `<div class="rev-item" data-rev="${x.id}" style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)">
+        📄 ${esc(x.title)} <span class="badge part">${esc(x.part)}</span> <span style="color:var(--ink-2)">${esc(staffName(x.author_id))}</span></div>`).join("")}
+      ${list.length > 3 ? `<div style="font-size:11.5px;color:var(--ink-2);margin-top:4px">+${list.length - 3} more in Review Inbox</div>` : ""}`;
+  } else {
+    const { data: mine } = await sb.from("reports").select("status").eq("author_id", ME.id);
+    const cnt = { draft: 0, submitted: 0, returned: 0, approved: 0 };
+    (mine || []).forEach((x) => cnt[x.status]++);
+    reviewHTML = `<div style="display:flex;gap:8px;flex-wrap:wrap">
+      ${Object.entries(cnt).map(([k, v]) => `<span class="badge ${k}">${ST_LABEL[k]}: ${v}</span>`).join("")}
+    </div>${cnt.returned ? `<div style="font-size:12px;color:var(--red);margin-top:8px">↩️ You have ${cnt.returned} returned report(s) to fix.</div>` : ""}`;
+  }
 
   $("#dashBody").innerHTML = `
     <div class="grid kpi">
-      <div class="card kpi-card"><div class="kpi-label">Total activities (hosted)</div><div class="kpi-num">${grand}</div><div class="kpi-sub">items</div></div>
-      ${["meeting", "vc", "trip", "other"].map((tp) => `
+      <div class="card kpi-card"><div class="kpi-label">Total activities (company)</div><div class="kpi-num">${grand}</div><div class="kpi-sub">items</div></div>
+      ${types.map((tp) => `
         <div class="card kpi-card"><div class="kpi-label"><span class="kpi-dot" style="background:${TYPE_COLOR[tp]}"></span>${TYPE_LABEL[tp]}</div>
-        <div class="kpi-num">${totals[tp]}</div><div class="kpi-sub">items</div></div>`).join("")}
+        <div class="kpi-num">${cTot[tp]}${tp === "trip" && cTripDays ? `<span style="font-size:14px;font-weight:600;color:var(--ink-2)"> / ${cTripDays}d</span>` : ""}</div>
+        <div class="kpi-sub">${tp === "trip" ? "trips / days" : "items"}</div></div>`).join("")}
     </div>
     <div class="two-col">
-      <div class="card"><h2 style="font-size:15px;margin-bottom:12px">Activities by employee (hosted)</h2>
-        <div class="chart-box" style="height:${Math.max(200, people.length * 34)}px"><canvas id="chStaff"></canvas></div></div>
       <div>
-        <div class="card" style="margin-bottom:16px"><h2 style="font-size:15px;margin-bottom:12px">Activity type mix</h2>
+        ${showIndiv ? `
+        <div class="card" style="margin-bottom:16px"><h2 style="font-size:15px;margin-bottom:12px">Activities by employee</h2>
+          <div class="chart-box" style="height:${Math.max(220, people.length * 34)}px"><canvas id="chStaff"></canvas></div></div>`
+        : `<div class="card" style="margin-bottom:16px"><h2 style="font-size:15px;margin-bottom:6px">Activities by employee</h2>
+          <div class="empty" style="padding:20px 10px">Individual stats are visible to part leaders and the director.<br/>Part-level results are shown on the right. 👉</div></div>`}
+        <div class="card"><h2 style="font-size:15px;margin-bottom:12px">Activity type mix (company)</h2>
           <div class="chart-box" style="height:200px"><canvas id="chType"></canvas></div></div>
-        <div class="card"><h2 style="font-size:15px;margin-bottom:10px">Part summary</h2>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <h2 style="font-size:15px">Part summary</h2>
+            ${isManager() ? `<button class="btn ghost sm" id="btnTargets">🎯 Set targets</button>` : ""}
+          </div>
           <table><thead><tr><th>Part</th><th>Meeting</th><th>VC</th><th>Trip</th><th>Other</th></tr></thead><tbody>
-          ${Object.entries(byPart).map(([p, v]) => `<tr><td><span class="badge part">${esc(p)}</span></td><td>${v.meeting}</td><td>${v.vc}</td><td>${v.trip}</td><td>${v.other}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No data</td></tr>`}
-          </tbody></table></div>
+          ${Object.entries(byPart).map(([p, v]) => `<tr>
+            <td><span class="badge part">${esc(p)}</span></td>
+            <td>${v.meeting}${gauge(p, "meeting")}</td>
+            <td>${v.vc}${gauge(p, "vc")}</td>
+            <td>${v.trip}${v.trip_days ? ` <span style="font-size:11px;color:var(--ink-2)">/ ${v.trip_days}d</span>` : ""}${gauge(p, "trip")}</td>
+            <td>${v.other}${gauge(p, "other")}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No data</td></tr>`}
+          </tbody></table>
+        </div>
+        <div class="card"><h2 style="font-size:15px;margin-bottom:10px">${isManager() ? "Review status" : "My reports"}</h2>${reviewHTML}</div>
       </div>
     </div>
-    <div class="section-head"><h2>Employee detail (hosted / joined)</h2></div>
+    ${showIndiv ? `
+    <div class="section-head"><h2>Employee detail</h2></div>
     <div class="card" style="padding:8px 14px">
-      <table><thead><tr><th>Name</th><th>Part</th><th>Meeting</th><th>VC</th><th>Trip</th><th>Other</th><th>Total</th></tr></thead><tbody>
+      <table><thead><tr><th>Name</th><th>Part</th><th>Meeting</th><th>VC</th><th>Trip (count / days)</th><th>Other</th><th>Total</th></tr></thead><tbody>
       ${people.map((p) => `<tr><td><b>${esc(p.name)}</b>${p.role !== "member" ? ` <span style="font-size:11px;color:var(--ink-2)">${ROLE_LABEL[p.role]}</span>` : ""}</td>
         <td><span class="badge part">${esc(p.part)}</span></td>
-        ${["meeting", "vc", "trip", "other"].map((tp) => `<td>${p.hosted[tp] || 0} <span style="color:var(--ink-2);font-size:11.5px">/ ${p.joined[tp] || 0}</span></td>`).join("")}
-        <td><b>${p.total}</b></td></tr>`).join("") || `<tr><td colspan="7" class="empty">No data</td></tr>`}
+        <td>${p.c.meeting || 0}</td><td>${p.c.vc || 0}</td>
+        <td>${p.c.trip || 0}${p.trip_days ? ` <span style="color:var(--ink-2);font-size:11.5px">/ ${p.trip_days}d</span>` : ""}</td>
+        <td>${p.c.other || 0}</td>
+        <td><b>${p.total}</b></td></tr>`).join("")}
       </tbody></table>
-    </div>`;
+    </div>` : ""}`;
 
-  const types = ["meeting", "vc", "trip", "other"];
-  charts.push(new Chart($("#chStaff"), {
-    type: "bar",
-    data: { labels: people.map((p) => p.name),
-      datasets: types.map((tp) => ({ label: TYPE_LABEL[tp], data: people.map((p) => p.hosted[tp] || 0), backgroundColor: TYPE_COLOR[tp], stack: "s" })) },
-    options: { indexAxis: "y", responsive: true, maintainAspectRatio: false,
-      scales: { x: { stacked: true, ticks: { precision: 0 } }, y: { stacked: true } },
-      plugins: { legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 11 } } } } },
-  }));
+  document.querySelectorAll("[data-rev]").forEach((el) => (el.onclick = () => openReport(Number(el.dataset.rev))));
+  if ($("#btnTargets")) $("#btnTargets").onclick = () => targetsModal();
+
+  if (showIndiv) {
+    charts.push(new Chart($("#chStaff"), {
+      type: "bar",
+      data: { labels: people.map((p) => p.name),
+        datasets: types.map((tp) => ({ label: TYPE_LABEL[tp], data: people.map((p) => p.c[tp] || 0), backgroundColor: TYPE_COLOR[tp], stack: "s" })) },
+      options: { indexAxis: "y", responsive: true, maintainAspectRatio: false,
+        scales: { x: { stacked: true, ticks: { precision: 0 } }, y: { stacked: true } },
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 12, font: { size: 11 } } } } },
+    }));
+  }
   charts.push(new Chart($("#chType"), {
     type: "doughnut",
-    data: { labels: types.map((tp) => TYPE_LABEL[tp]), datasets: [{ data: types.map((tp) => totals[tp]), backgroundColor: types.map((tp) => TYPE_COLOR[tp]) }] },
+    data: { labels: types.map((tp) => TYPE_LABEL[tp]), datasets: [{ data: types.map((tp) => cTot[tp]), backgroundColor: types.map((tp) => TYPE_COLOR[tp]) }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { boxWidth: 12, font: { size: 11 } } } } },
   }));
+}
+
+async function targetsModal() {
+  const parts = [...new Set(STAFF.filter((x) => x.status === "active").map((x) => x.part))];
+  const myParts = ME.role === "leader" && !ME.is_admin && ME.role !== "director" ? [ME.part] : parts;
+  const y = new Date().getFullYear();
+  const halves = [`${y}-H1`, `${y}-H2`, `${y + 1}-H1`];
+  openModal(`
+    <h3>🎯 Set half-year targets</h3>
+    <div class="row2">
+      <div class="field"><label>Part</label><select id="tgPart">${myParts.map((p) => `<option>${esc(p)}</option>`).join("")}</select></div>
+      <div class="field"><label>Period</label><select id="tgHalf">${halves.map((h) => `<option ${h === halfKey() ? "selected" : ""}>${h}</option>`).join("")}</select></div>
+    </div>
+    <div class="row2">
+      ${["meeting", "vc", "trip", "other"].map((t) => `<div class="field"><label>${TYPE_LABEL[t]} target</label><input type="number" min="0" id="tg_${t}" placeholder="none" /></div>`).join("")}
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="tgSave">Save targets</button>
+    </div>`);
+  const loadExisting = async () => {
+    const { data } = await sb.from("targets").select("*").eq("part", $("#tgPart").value).eq("half", $("#tgHalf").value);
+    ["meeting", "vc", "trip", "other"].forEach((t) => { $("#tg_" + t).value = (data || []).find((x) => x.a_type === t)?.target ?? ""; });
+  };
+  $("#tgPart").onchange = loadExisting; $("#tgHalf").onchange = loadExisting;
+  await loadExisting();
+  $("#tgSave").onclick = async () => {
+    const part = $("#tgPart").value, half = $("#tgHalf").value;
+    for (const t of ["meeting", "vc", "trip", "other"]) {
+      const v = $("#tg_" + t).value;
+      if (v === "" || Number(v) === 0) {
+        await sb.from("targets").delete().eq("part", part).eq("half", half).eq("a_type", t);
+      } else {
+        const { error } = await sb.from("targets").upsert({ part, half, a_type: t, target: Number(v) }, { onConflict: "part,half,a_type" });
+        if (error) return alert("Save failed: " + error.message);
+      }
+    }
+    closeModal(); renderDashboard();
+  };
 }
 
 /* =========================================================
@@ -258,7 +383,7 @@ async function renderDashboard() {
 async function renderActivities() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Activities</div>
-    <div class="page-sub">Log meetings, VCs and business trips (adding participants credits them too)</div>
+    <div class="page-sub">Log meetings, VCs and business trips. New/edited activities need leader approval before they count in the dashboard.</div>
     ${periodBarHTML()}
     <div class="section-head"><h2>Activity list</h2><button class="btn" id="btnNewAct">+ New activity</button></div>
     <div class="card" style="padding:8px 14px" id="actList"><div class="empty">Loading...</div></div>`;
@@ -274,20 +399,34 @@ async function renderActivities() {
   const rows = (acts || []).map((a) => {
     const parts = (a.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => staffName(p.staff_id));
     const mine = a.created_by === ME.id;
+    const reviewer = canReviewActivity(a);
+    const days = a.type === "trip" ? Math.round((new Date(a.end_date || a.activity_date) - new Date(a.activity_date)) / 86400000) + 1 : 1;
+    const dateTxt = a.type === "trip" && a.end_date && a.end_date !== a.activity_date
+      ? `${fmtD(a.activity_date)} ~ ${fmtD(a.end_date)} <span style="font-size:11px;color:var(--ink-2)">(${days}d)</span>`
+      : fmtD(a.activity_date);
     return `<tr>
-      <td style="white-space:nowrap">${fmtD(a.activity_date)}</td>
+      <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
       <td><b>${esc(a.customer)}</b></td>
       <td>${esc(a.title)}${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
       <td>${esc(staffName(a.created_by))}</td>
       <td style="font-size:12.5px">${parts.map(esc).join(", ") || "-"}</td>
-      <td style="white-space:nowrap">${mine ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-del="${a.id}">Delete</button>` : ""}</td>
+      <td><span class="badge ${a.status === "approved" ? "approved" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
+      <td style="white-space:nowrap">
+        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button> ` : ""}
+        ${mine ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-del="${a.id}">Delete</button>` : ""}
+      </td>
     </tr>`;
   }).join("");
   $("#actList").innerHTML = rows
-    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Customer</th><th>Topic</th><th>Host</th><th>Participants</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Customer</th><th>Topic</th><th>Host</th><th>Participants</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">No activities in this period. Log your first one!</div>`;
 
+  document.querySelectorAll("[data-appract]").forEach((b) => (b.onclick = async () => {
+    const { error } = await sb.from("activities").update({ status: "approved" }).eq("id", b.dataset.appract);
+    if (error) return alert("Approve failed: " + error.message);
+    renderActivities();
+  }));
   document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => activityModal((acts || []).find((a) => a.id == b.dataset.edit))));
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
     if (!confirm("Delete this activity?")) return;
@@ -301,10 +440,14 @@ function activityModal(edit = null) {
   const options = STAFF.filter((s) => s.status === "active" && s.id !== ME.id);
   openModal(`
     <h3>${edit ? "Edit activity" : "New activity"}</h3>
+    ${edit && edit.status === "approved" ? `<p style="font-size:12.5px;color:var(--amber);margin-bottom:10px">⚠️ Editing an approved activity sends it back to Pending for re-approval.</p>` : ""}
     <div class="row2">
       <div class="field"><label>Type</label><select id="aType">
         ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
-      <div class="field"><label>Date</label><input type="date" id="aDate" value="${edit?.activity_date || new Date().toISOString().slice(0, 10)}" /></div>
+      <div class="field"><label>Date${edit?.type === "trip" ? " (start)" : ""}</label><input type="date" id="aDate" value="${edit?.activity_date || new Date().toISOString().slice(0, 10)}" /></div>
+    </div>
+    <div class="field" id="aEndWrap" style="display:${edit?.type === "trip" ? "block" : "none"}">
+      <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
     <div class="field"><label>Customer</label><input id="aCust" value="${esc(edit?.customer || "")}" placeholder="e.g. Seaspan" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
@@ -326,12 +469,17 @@ function activityModal(edit = null) {
   };
   drawChips();
   $("#aPickP").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
+  $("#aType").onchange = () => { $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none"; };
 
   $("#aSave").onclick = async () => {
+    const isTrip = $("#aType").value === "trip";
     const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
+      end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
       customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
-      notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id };
+      notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id,
+      status: "pending" };
     if (!rec.customer || !rec.title || !rec.activity_date) return alert("Customer, topic and date are required.");
+    if (isTrip && rec.end_date < rec.activity_date) return alert("Trip end date must be on or after the start date.");
 
     let actId;
     if (edit) {
@@ -358,20 +506,35 @@ function activityModal(edit = null) {
 async function renderReports() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Meeting Reports</div>
-    <div class="page-sub">Draft → submit to part leader → approve/return, all in one place</div>
+    <div class="page-sub">Draft → submit to part leader → approve/return. Leaders can edit directly — all changes are tracked.</div>
+    <div class="filterbar" id="tagBar" style="display:${isManager() && TAGS.length ? "flex" : "none"}">
+      <span style="font-size:12px;font-weight:700;color:var(--ink-2)">TAG FILTER</span>
+      <div class="seg" id="tagSeg">
+        <button data-tag="0" class="${repTagFilter === 0 ? "active" : ""}">All</button>
+        ${TAGS.map((t) => `<button data-tag="${t.id}" class="${repTagFilter === t.id ? "active" : ""}">${esc(t.name)}</button>`).join("")}
+      </div>
+      ${isManager() ? `<button class="btn ghost sm" id="btnTags" style="margin-left:auto">🏷️ Manage tags</button>` : ""}
+    </div>
     <div class="section-head"><h2>Report list</h2><button class="btn" id="btnNewRep">+ New report</button></div>
     <div class="card" style="padding:8px 14px" id="repList"><div class="empty">Loading...</div></div>`;
   $("#btnNewRep").onclick = () => reportModal();
+  if ($("#btnTags")) $("#btnTags").onclick = tagsModal;
+  document.querySelectorAll("#tagSeg [data-tag]").forEach((b) => (b.onclick = () => { repTagFilter = Number(b.dataset.tag); renderReports(); }));
   await drawReportList("#repList");
 }
 
 async function drawReportList(sel, onlySubmitted = false) {
-  let q = sb.from("reports").select("*").order("updated_at", { ascending: false });
+  let q = sb.from("reports").select("*, report_tags(tag_id)").order("updated_at", { ascending: false });
   if (onlySubmitted) q = q.eq("status", "submitted");
-  const { data: reps } = await q;
-  const rows = (reps || []).map((r) => `
+  const { data } = await q;
+  let reps = data || [];
+  if (!onlySubmitted && repTagFilter) reps = reps.filter((r) => (r.report_tags || []).some((t) => t.tag_id === repTagFilter));
+  const tagName = (id) => TAGS.find((t) => t.id === id)?.name || "";
+  const rows = reps.map((r) => `
     <tr class="clickable" data-open="${r.id}">
       <td style="white-space:nowrap">${fmtD(r.meeting_date)}</td>
+      <td><span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
+        ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join(" ")}</td>
       <td><b>${esc(r.customer)}</b></td>
       <td>${esc(r.title)}</td>
       <td>${esc(staffName(r.author_id))} <span class="badge part">${esc(r.part)}</span></td>
@@ -379,18 +542,53 @@ async function drawReportList(sel, onlySubmitted = false) {
       <td><span class="badge ${r.status}">${ST_LABEL[r.status]}</span></td>
     </tr>`).join("");
   $(sel).innerHTML = rows
-    ? `<table><thead><tr><th>Meeting date</th><th>Customer</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<div class="empty">${onlySubmitted ? "No reports awaiting review." : "No reports yet. Write your first one!"}</div>`;
+    ? `<table><thead><tr><th>Date</th><th>Type / Tags</th><th>Customer</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">${onlySubmitted ? "No reports awaiting review." : "No reports match. Write your first one!"}</div>`;
   document.querySelectorAll("[data-open]").forEach((tr) => (tr.onclick = () => openReport(Number(tr.dataset.open))));
 }
 
+async function tagsModal() {
+  openModal(`
+    <h3>🏷️ Manage tags</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Leaders and the director create tags; everyone can attach them to reports (e.g. Weekly, Monthly, Annual).</p>
+    <div class="chips" id="tagList" style="margin-bottom:14px"></div>
+    <div class="field" style="display:flex;gap:8px">
+      <input id="newTag" placeholder="New tag name" style="flex:1" />
+      <button class="btn sm" id="addTag">Add</button>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+  const draw = () => {
+    $("#tagList").innerHTML = TAGS.map((t) => `<span class="chip">${esc(t.name)}<button data-deltag="${t.id}">×</button></span>`).join("") || `<span style="font-size:12.5px;color:var(--ink-2)">No tags yet</span>`;
+    document.querySelectorAll("[data-deltag]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("Delete this tag? It will be removed from all reports.")) return;
+      await sb.from("tag_defs").delete().eq("id", b.dataset.deltag);
+      TAGS = TAGS.filter((t) => t.id != b.dataset.deltag); draw();
+    }));
+  };
+  draw();
+  $("#addTag").onclick = async () => {
+    const name = $("#newTag").value.trim();
+    if (!name) return;
+    const { data, error } = await sb.from("tag_defs").insert({ name, created_by: ME.id }).select("*").single();
+    if (error) return alert("Add failed (duplicate name?): " + error.message);
+    TAGS.push(data); TAGS.sort((a, b) => a.name.localeCompare(b.name));
+    $("#newTag").value = ""; draw();
+  };
+}
+
 function reportModal(edit = null) {
+  const pickedTags = new Set(edit ? (edit.report_tags || []).map((t) => t.tag_id) : []);
   openModal(`
     <h3>${edit ? `Edit report (v${edit.version})` : "New meeting report"}</h3>
     <div class="row2">
-      <div class="field"><label>Customer</label><input id="rCust" value="${esc(edit?.customer || "")}" /></div>
+      <div class="field"><label>Report type</label><select id="rType">
+        ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.report_type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
       <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || new Date().toISOString().slice(0, 10)}" /></div>
     </div>
+    ${TAGS.length ? `<div class="field"><label>Tags (optional, multiple)</label>
+      <div class="chips">${TAGS.map((t) => `<span class="chip tagpick" data-tid="${t.id}" style="cursor:pointer;${pickedTags.has(t.id) ? "background:var(--navy);color:#fff" : ""}">${esc(t.name)}</span>`).join("")}</div>
+    </div>` : ""}
+    <div class="field"><label>Customer / counterpart</label><input id="rCust" value="${esc(edit?.customer || "")}" placeholder="e.g. Seaspan — or team name for internal reports" /></div>
     <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
     <div class="field"><label>Discussion</label><textarea id="rContent" style="min-height:160px">${esc(edit?.content || "")}</textarea></div>
     <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
@@ -398,47 +596,99 @@ function reportModal(edit = null) {
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="rSave">${edit ? "Save" : "Create (saved as draft)"}</button>
     </div>`);
+  document.querySelectorAll(".tagpick").forEach((c) => (c.onclick = () => {
+    const id = Number(c.dataset.tid);
+    if (pickedTags.has(id)) { pickedTags.delete(id); c.style.background = ""; c.style.color = ""; }
+    else { pickedTags.add(id); c.style.background = "var(--navy)"; c.style.color = "#fff"; }
+  }));
   $("#rSave").onclick = async () => {
     const rec = { customer: $("#rCust").value.trim(), meeting_date: $("#rDate").value,
+      report_type: $("#rType").value,
       title: $("#rTitle").value.trim(), content: $("#rContent").value,
       followup: $("#rFollow").value, updated_at: new Date().toISOString() };
     if (!rec.customer || !rec.title) return alert("Customer and title are required.");
+    let repId;
     if (edit) {
       const { error } = await sb.from("reports").update(rec).eq("id", edit.id);
       if (error) return alert("Save failed: " + error.message);
-      await logEvent(edit.id, "edit", null, edit.version);
-      closeModal(); openReport(edit.id);
+      repId = edit.id;
+      await logEvent(repId, "edit", null, edit.version, rec.content, rec.followup);
     } else {
       const { data, error } = await sb.from("reports").insert({ ...rec, author_id: ME.id, part: ME.part }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
-      await logEvent(data.id, "create", null, 1);
-      closeModal(); openReport(data.id);
+      repId = data.id;
+      await logEvent(repId, "create", null, 1, rec.content, rec.followup);
     }
+    await sb.from("report_tags").delete().eq("report_id", repId);
+    if (pickedTags.size) await sb.from("report_tags").insert([...pickedTags].map((tid) => ({ report_id: repId, tag_id: tid })));
+    closeModal(); openReport(repId);
   };
 }
 
-async function logEvent(reportId, action, comment = null, version = 1) {
-  await sb.from("report_events").insert({ report_id: reportId, actor_id: ME.id, action, comment, version });
+async function logEvent(reportId, action, comment = null, version = 1, content = null, followup = null) {
+  await sb.from("report_events").insert({ report_id: reportId, actor_id: ME.id, action, comment, version,
+    content_snapshot: content, followup_snapshot: followup });
+}
+
+/* Word-level diff: deletions red strikethrough, additions blue */
+function diffWords(oldStr, newStr) {
+  const tok = (x) => String(x ?? "").split(/(\s+)/).filter((t) => t !== "");
+  const A = tok(oldStr), B = tok(newStr);
+  if (A.length * B.length > 400000) return null; // too large, skip diff
+  const n = A.length, m = B.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const DEL = (t) => `<span style="color:#b3261e;background:#fdecec;text-decoration:line-through">${esc(t)}</span>`;
+  const INS = (t) => `<span style="color:#1d4fb8;background:#e8f0fe;font-weight:600">${esc(t)}</span>`;
+  let i = 0, j = 0; const out = [];
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { out.push(esc(A[i])); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { if (A[i].trim()) out.push(DEL(A[i])); i++; }
+    else { out.push(B[j].trim() ? INS(B[j]) : esc(B[j])); j++; }
+  }
+  while (i < n) { if (A[i].trim()) out.push(DEL(A[i])); i++; }
+  while (j < m) { out.push(B[j].trim() ? INS(B[j]) : esc(B[j])); j++; }
+  return out.join("");
 }
 
 async function openReport(id) {
-  const { data: r } = await sb.from("reports").select("*").eq("id", id).single();
+  const { data: r } = await sb.from("reports").select("*, report_tags(tag_id)").eq("id", id).single();
   if (!r) return alert("Can't open this report (no permission).");
   openedReportId = id;
   const { data: events } = await sb.from("report_events").select("*").eq("report_id", id).order("created_at", { ascending: false });
 
   const isAuthor = r.author_id === ME.id;
   const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || ME.role === "director" || ME.is_admin;
-  const canEdit = isAuthor && (r.status === "draft" || r.status === "returned");
+  const canEdit = (isAuthor && (r.status === "draft" || r.status === "returned")) || (canReview && r.status === "submitted");
   const canSubmit = isAuthor && (r.status === "draft" || r.status === "returned");
   const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented" };
   const dotCls = { submit: "submit", return: "return", approve: "approve" };
+
+  // Build diffs: for each edit event, compare with the previous snapshot (chronological)
+  const asc = [...(events || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const diffs = {};
+  let prevSnap = null;
+  asc.forEach((e) => {
+    if (e.content_snapshot !== null && e.content_snapshot !== undefined) {
+      if (e.action === "edit" && prevSnap) {
+        const dc = diffWords(prevSnap.c, e.content_snapshot);
+        const df = diffWords(prevSnap.f, e.followup_snapshot);
+        if ((dc && dc !== esc(e.content_snapshot)) || (df && df !== esc(e.followup_snapshot ?? "")))
+          diffs[e.id] = { dc, df };
+      }
+      prevSnap = { c: e.content_snapshot, f: e.followup_snapshot };
+    }
+  });
 
   const main = $("#main");
   main.innerHTML = `
     <button class="btn ghost sm" id="backBtn">← Back to list</button>
     <div style="display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap">
       <div class="page-title">${esc(r.title)}</div>
+      <span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
+      ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(TAGS.find((x) => x.id === t.tag_id)?.name || "")}</span>`).join(" ")}
       <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
       <span class="badge part">v${r.version}</span>
     </div>
@@ -453,7 +703,7 @@ async function openReport(id) {
           <div class="report-content">${esc(r.followup) || "-"}</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit</button>` : ""}
+          ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit${canReview && !isAuthor ? " (as reviewer)" : ""}</button>` : ""}
           ${canSubmit ? `<button class="btn navy" id="repSubmit">📤 Submit to part leader</button>` : ""}
           ${canReview && r.status === "submitted" ? `
             <button class="btn" id="repApprove">✅ Approve</button>
@@ -468,9 +718,14 @@ async function openReport(id) {
             <div class="tl-item">
               <div class="tl-dot ${dotCls[e.action] || ""}"></div>
               <div class="tl-body">
-                <div class="tl-head">${esc(staffName(e.actor_id))} · ${evLabel[e.action]} <span style="color:var(--ink-2);font-weight:400">(v${e.version})</span></div>
+                <div class="tl-head">${esc(staffName(e.actor_id))}${e.actor_id !== r.author_id ? ` <span style="font-size:10.5px;color:var(--blue);font-weight:700">REVIEWER</span>` : ""} · ${evLabel[e.action]} <span style="color:var(--ink-2);font-weight:400">(v${e.version})</span></div>
                 <div class="tl-time">${fmtDT(e.created_at)}</div>
                 ${e.comment ? `<div class="tl-comment">${esc(e.comment)}</div>` : ""}
+                ${diffs[e.id] ? `<div class="tl-comment" style="background:#fff">
+                  <div style="font-size:11px;font-weight:700;color:var(--ink-2);margin-bottom:4px">CHANGES (<span style="color:#b3261e;text-decoration:line-through">removed</span> / <span style="color:#1d4fb8;font-weight:700">added</span>)</div>
+                  ${diffs[e.id].dc ? `<div style="white-space:pre-wrap">${diffs[e.id].dc}</div>` : ""}
+                  ${diffs[e.id].df && diffs[e.id].df !== esc("") ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line);white-space:pre-wrap"><span style="font-size:11px;font-weight:700;color:var(--ink-2)">Follow-up: </span>${diffs[e.id].df}</div>` : ""}
+                </div>` : ""}
               </div>
             </div>`).join("") || `<div class="empty">No history</div>`}
         </div>
@@ -487,7 +742,7 @@ async function openReport(id) {
     const newVer = r.status === "returned" ? r.version + 1 : r.version;
     const { error } = await sb.from("reports").update({ status: "submitted", version: newVer, updated_at: new Date().toISOString() }).eq("id", r.id);
     if (error) return alert("Submit failed: " + error.message);
-    await logEvent(r.id, "submit", null, newVer); openReport(r.id);
+    await logEvent(r.id, "submit", null, newVer, r.content, r.followup); openReport(r.id);
   };
   if ($("#repApprove")) $("#repApprove").onclick = async () => {
     if (!confirm("Approve this report?")) return;
@@ -526,12 +781,26 @@ async function renderReview() {
    ========================================================= */
 async function renderAdmin() {
   const main = $("#main");
-  const { data: staff } = await sb.from("staff").select("*").order("part").order("name");
+  const [{ data: staff }, { data: settingRows }] = await Promise.all([
+    sb.from("staff").select("*").order("part").order("name"),
+    sb.from("app_settings").select("*").eq("key", "show_individual_stats"),
+  ]);
+  const showIndiv = settingRows?.[0]?.value === "true";
   const pending = (staff || []).filter((s) => s.status === "pending");
   const rest = (staff || []).filter((s) => s.status !== "pending");
 
   main.innerHTML = `<div class="page-title">Admin</div>
-    <div class="page-sub">Roster · account approval · permissions</div>
+    <div class="page-sub">Roster · account approval · permissions · dashboard settings</div>
+
+    <div class="card" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div>
+        <b style="font-size:14px">📊 Individual stats visibility</b>
+        <div style="font-size:12.5px;color:var(--ink-2)">Currently ${showIndiv
+          ? "<b style='color:var(--green-dark)'>everyone</b> can see per-employee stats on the dashboard."
+          : "only <b>part leaders & the director</b> can see per-employee stats. Members see company & part totals."}</div>
+      </div>
+      <button class="btn ${showIndiv ? "danger" : "navy"}" id="btnToggleIndiv">${showIndiv ? "Hide from members" : "Show to everyone"}</button>
+    </div>
 
     ${pending.length ? `
     <div class="section-head"><h2>🔔 Pending approval (${pending.length})</h2></div>
@@ -560,6 +829,11 @@ async function renderAdmin() {
       </tbody></table></div>`;
 
   $("#btnAddStaff").onclick = () => staffModal();
+  $("#btnToggleIndiv").onclick = async () => {
+    const { error } = await sb.from("app_settings").update({ value: showIndiv ? "false" : "true" }).eq("key", "show_individual_stats");
+    if (error) return alert("Failed to update setting: " + error.message);
+    renderAdmin();
+  };
   document.querySelectorAll("[data-appr]").forEach((b) => (b.onclick = async () => {
     await sb.from("staff").update({ status: "active" }).eq("id", b.dataset.appr); renderAdmin(); }));
   document.querySelectorAll("[data-rej]").forEach((b) => (b.onclick = async () => {
