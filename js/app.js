@@ -839,11 +839,11 @@ async function renderAdmin() {
         <td><span class="badge ${s.status}">${SS_LABEL[s.status]}</span></td>
         <td>${esc(s.login_id || "-")}</td>
         <td style="white-space:nowrap">
-          <button class="btn ghost sm" data-editStaff="${s.id}">Edit</button>
+          <button class="btn ghost sm" data-editstaff="${s.id}">Edit</button>
           ${s.status === "active" && s.id !== ME.id ? `<button class="btn ghost sm" data-disable="${s.id}" style="color:var(--red)">Disable</button>` : ""}
           ${s.status === "disabled" ? `<button class="btn ghost sm" data-enable="${s.id}">Enable</button>` : ""}
           ${s.user_id ? `<button class="btn ghost sm" data-resetpw="${s.id}">Reset PW</button>` : ""}
-          ${s.status === "unclaimed" ? `<button class="btn ghost sm" data-delStaff="${s.id}" style="color:var(--red)">Delete</button>` : ""}
+          ${s.status === "unclaimed" ? `<button class="btn ghost sm" data-delstaff="${s.id}" style="color:var(--red)">Delete</button>` : ""}
         </td></tr>`).join("")}
       </tbody></table></div>`;
 
@@ -873,11 +873,11 @@ async function renderAdmin() {
     await sb.from("staff").update({ status: "active" }).eq("id", b.dataset.enable); renderAdmin(); }));
   document.querySelectorAll("[data-resetpw]").forEach((b) => (b.onclick = () => {
     const s2 = staff.find((x) => x.id == b.dataset.resetpw); resetPwModal(s2); }));
-  document.querySelectorAll("[data-delStaff]").forEach((b) => (b.onclick = async () => {
+  document.querySelectorAll("[data-delstaff]").forEach((b) => (b.onclick = async () => {
     if (!confirm("Delete this roster entry?")) return;
-    await sb.from("staff").delete().eq("id", b.dataset.delStaff); renderAdmin(); }));
-  document.querySelectorAll("[data-editStaff]").forEach((b) => (b.onclick = () => {
-    const s = staff.find((x) => x.id == b.dataset.editStaff); staffModal(s); }));
+    await sb.from("staff").delete().eq("id", b.dataset.delstaff); renderAdmin(); }));
+  document.querySelectorAll("[data-editstaff]").forEach((b) => (b.onclick = () => {
+    const s2 = staff.find((x) => x.id == b.dataset.editstaff); staffModal(s2); }));
 }
 
 function resetPwModal(s2) {
