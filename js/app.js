@@ -15,6 +15,10 @@ const ACT_ST     = { pending: "Pending approval", approved: "Approved" };
 const RTYPE_LABEL = { customer: "Customer Meeting", internal: "Internal" };
 let TAGS = [];        // tag catalog (created by leaders/director)
 let PARTS = [];       // parts catalog (managed by admin) — {id, name, color}
+let COMPANIES = [];   // customer catalog — {id, name, part}
+let CONTRACTS = [];   // contracts — {id, company_id, name}
+const companyName = (id) => COMPANIES.find((c) => c.id === id)?.name || "";
+const contractName = (id) => { const c = CONTRACTS.find((x) => x.id === id); return c ? c.name : ""; };
 const PART_PALETTE = ["#00a651", "#2e7cf6", "#f0a020", "#9b59d0", "#e5568c", "#12a5a5", "#e2574c", "#5a6b7d"];
 const partColor = (name) => PARTS.find((p) => p.name === name)?.color || "#5a6b7d";
 const partBadge = (name) => { const c = partColor(name); return `<span class="badge" style="background:${c}1c;color:${c};border:1px solid ${c}44">${esc(name)}</span>`; };
@@ -32,6 +36,137 @@ const fmtD = (d) => (d ? String(d).slice(0, 10) : "-");
 const fmtDT = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")} ${String(x.getHours()).padStart(2, "0")}:${String(x.getMinutes()).padStart(2, "0")}`; };
 const staffName = (id) => STAFF.find((s) => s.id === id)?.name || `#${id}`;
 const idEmail = (id) => `${id.trim().toLowerCase()}@${CONFIG.EMAIL_DOMAIN}`;
+
+/* =========================================================
+   COMPANY / CONTRACT TAG PANEL (shared by activity & report modals)
+   ========================================================= */
+function tagPanelHTML() {
+  return `
+  <div class="field" style="background:#f7fafc;border:1.5px solid var(--line);border-radius:10px;padding:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      <label style="margin:0">🏢 Companies</label>
+      <input id="coSearch" placeholder="🔍 Search..." style="width:150px;padding:5px 9px;border:1.5px solid var(--line);border-radius:7px;font-size:12px" />
+    </div>
+    <div class="chips" id="coPanel" style="max-height:110px;overflow-y:auto"></div>
+    <div id="ctWrap" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)">
+      <label style="display:block;font-size:12.5px;font-weight:600;color:var(--ink-2);margin-bottom:5px">📋 Contracts (optional)</label>
+      <div class="chips" id="ctPanel"></div>
+    </div>
+    <div style="font-size:11px;color:var(--ink-2);margin-top:8px">Missing a company/contract tag? Mention it in the notes — your part leader can add it.</div>
+  </div>`;
+}
+
+function bindTagPanel(pickedCos, pickedCts) {
+  const sortedCos = () => {
+    const q = ($("#coSearch")?.value || "").toLowerCase();
+    return COMPANIES
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const am = a.part === ME.part ? 0 : 1, bm = b.part === ME.part ? 0 : 1;
+        return am - bm || a.name.localeCompare(b.name);
+      });
+  };
+  const chipStyle = (on) => on ? "background:var(--navy);color:#fff;cursor:pointer" : "cursor:pointer";
+  const drawCts = () => {
+    const avail = CONTRACTS.filter((ct) => pickedCos.has(ct.company_id));
+    [...pickedCts].forEach((id) => { if (!avail.some((a) => a.id === id)) pickedCts.delete(id); });
+    $("#ctWrap").style.display = avail.length ? "block" : "none";
+    $("#ctPanel").innerHTML = avail.map((ct) =>
+      `<span class="chip ctpick" data-ct="${ct.id}" style="${chipStyle(pickedCts.has(ct.id))}">${esc(companyName(ct.company_id))} · ${esc(ct.name)}</span>`).join("");
+    document.querySelectorAll(".ctpick").forEach((ch) => (ch.onclick = () => {
+      const id = Number(ch.dataset.ct);
+      pickedCts.has(id) ? pickedCts.delete(id) : pickedCts.add(id);
+      drawCts();
+    }));
+  };
+  const drawCos = () => {
+    $("#coPanel").innerHTML = sortedCos().map((c) =>
+      `<span class="chip copick" data-co="${c.id}" style="${chipStyle(pickedCos.has(c.id))}">${esc(c.name)}${c.part ? ` <span style="font-size:10px;opacity:.7">${esc(c.part)}</span>` : ""}</span>`).join("")
+      || `<span style="font-size:12px;color:var(--ink-2)">${COMPANIES.length ? "No match" : "No companies yet — leaders can add them via the Companies button."}</span>`;
+    document.querySelectorAll(".copick").forEach((ch) => (ch.onclick = () => {
+      const id = Number(ch.dataset.co);
+      pickedCos.has(id) ? pickedCos.delete(id) : pickedCos.add(id);
+      drawCos(); drawCts();
+    }));
+  };
+  $("#coSearch").oninput = drawCos;
+  drawCos(); drawCts();
+}
+
+/* ---------- Companies management (leaders / director / admin) ---------- */
+function companiesModal() {
+  let selCo = null;
+  openModal(`
+    <h3>🏢 Manage companies & contracts</h3>
+    <div class="field" style="display:flex;gap:8px">
+      <input id="mcSearch" placeholder="🔍 Search companies..." style="flex:1" />
+    </div>
+    <div class="chips" id="mcList" style="max-height:130px;overflow-y:auto;margin-bottom:10px"></div>
+    <div class="row2">
+      <div class="field"><label>New company name</label><input id="mcName" placeholder="e.g. Seaspan" /></div>
+      <div class="field"><label>Owning part (optional)</label><select id="mcPart"><option value="">— shared —</option>${PARTS.map((p) => `<option>${esc(p.name)}</option>`).join("")}</select></div>
+    </div>
+    <button class="btn sm" id="mcAdd">+ Add company</button>
+    <div id="mcContracts" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+      <label style="font-weight:700;font-size:13px" id="mcCoTitle"></label>
+      <div class="chips" id="mcCtList" style="margin:8px 0"></div>
+      <div style="display:flex;gap:8px">
+        <input id="mcCtName" placeholder="New contract name (e.g. 7K LTSA)" style="flex:1;padding:8px 10px;border:1.5px solid var(--line);border-radius:7px" />
+        <button class="btn sm" id="mcCtAdd">+ Add</button>
+      </div>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+
+  const drawCts = () => {
+    if (!selCo) { $("#mcContracts").style.display = "none"; return; }
+    $("#mcContracts").style.display = "block";
+    $("#mcCoTitle").textContent = `Contracts of ${companyName(selCo)}`;
+    const list = CONTRACTS.filter((c) => c.company_id === selCo);
+    $("#mcCtList").innerHTML = list.map((c) =>
+      `<span class="chip">${esc(c.name)}<button data-mcctdel="${c.id}">×</button></span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">No contracts yet</span>`;
+    document.querySelectorAll("[data-mcctdel]").forEach((b) => (b.onclick = async () => {
+      if (!confirm("Delete this contract tag?")) return;
+      await sb.from("contracts").delete().eq("id", b.dataset.mcctdel);
+      CONTRACTS = CONTRACTS.filter((c) => c.id != b.dataset.mcctdel); drawCts();
+    }));
+  };
+  const drawList = () => {
+    const q = ($("#mcSearch").value || "").toLowerCase();
+    $("#mcList").innerHTML = COMPANIES.filter((c) => c.name.toLowerCase().includes(q)).map((c) =>
+      `<span class="chip" data-mcsel="${c.id}" style="cursor:pointer;${selCo === c.id ? "background:var(--navy);color:#fff" : ""}">${esc(c.name)}${c.part ? ` <span style="font-size:10px;opacity:.7">${esc(c.part)}</span>` : ""}<button data-mcdel="${c.id}">×</button></span>`).join("")
+      || `<span style="font-size:12px;color:var(--ink-2)">No companies yet</span>`;
+    document.querySelectorAll("[data-mcsel]").forEach((ch) => (ch.onclick = (e) => {
+      if (e.target.dataset.mcdel) return;
+      selCo = Number(ch.dataset.mcsel); drawList(); drawCts();
+    }));
+    document.querySelectorAll("[data-mcdel]").forEach((b) => (b.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm("Delete this company and its contract tags?")) return;
+      await sb.from("companies").delete().eq("id", b.dataset.mcdel);
+      COMPANIES = COMPANIES.filter((c) => c.id != b.dataset.mcdel);
+      CONTRACTS = CONTRACTS.filter((c) => c.company_id != b.dataset.mcdel);
+      if (selCo == b.dataset.mcdel) selCo = null;
+      drawList(); drawCts();
+    }));
+  };
+  $("#mcSearch").oninput = drawList;
+  $("#mcAdd").onclick = async () => {
+    const name = $("#mcName").value.trim();
+    if (!name) return;
+    const { data, error } = await sb.from("companies").insert({ name, part: $("#mcPart").value || null }).select("*").single();
+    if (error) return alert("Add failed (duplicate?): " + error.message);
+    COMPANIES.push(data); COMPANIES.sort((a, b) => a.name.localeCompare(b.name));
+    $("#mcName").value = ""; drawList();
+  };
+  $("#mcCtAdd").onclick = async () => {
+    const name = $("#mcCtName").value.trim();
+    if (!name || !selCo) return;
+    const { data, error } = await sb.from("contracts").insert({ company_id: selCo, name }).select("*").single();
+    if (error) return alert("Add failed (duplicate?): " + error.message);
+    CONTRACTS.push(data); $("#mcCtName").value = ""; drawCts();
+  };
+  drawList();
+}
 
 /* =========================================================
    IDLE LOCK: 4h of inactivity → soft lock (password re-entry).
@@ -189,6 +324,11 @@ async function afterLogin() {
   TAGS = tagRows || [];
   const { data: partRowsG } = await sb.from("parts").select("*").order("name");
   PARTS = partRowsG || [];
+  const [{ data: coRows }, { data: ctRows }] = await Promise.all([
+    sb.from("companies").select("*").order("name"),
+    sb.from("contracts").select("*").order("name"),
+  ]);
+  COMPANIES = coRows || []; CONTRACTS = ctRows || [];
 
   $("#auth").style.display = "none"; $("#app").style.display = "block";
   $("#meName").textContent = ME.name; $("#mePart").textContent = ME.part;
@@ -460,14 +600,17 @@ async function renderActivities() {
   main.innerHTML = `<div class="page-title">Activities</div>
     <div class="page-sub">Log meetings, VCs and business trips. New/edited activities need leader approval before they count in the dashboard.</div>
     ${periodBarHTML()}
-    <div class="section-head"><h2>Activity list</h2><button class="btn" id="btnNewAct">+ New activity</button></div>
+    <div class="section-head"><h2>Activity list</h2><div style="display:flex;gap:8px">
+      ${isManager() ? `<button class="btn ghost" id="btnCompanies">🏢 Companies</button>` : ""}
+      <button class="btn" id="btnNewAct">+ New activity</button></div></div>
     <div class="card" style="padding:8px 14px" id="actList"><div class="empty">Loading...</div></div>`;
   bindPeriodBar(renderActivities);
   $("#btnNewAct").onclick = () => activityModal();
+  if ($("#btnCompanies")) $("#btnCompanies").onclick = companiesModal;
 
   const r = getRange();
   const { data: acts } = await sb.from("activities")
-    .select("*, activity_participants(staff_id,p_role)")
+    .select("*, activity_participants(staff_id,p_role), activity_companies(company_id), activity_contracts(contract_id)")
     .gte("activity_date", r.from).lte("activity_date", r.to)
     .order("activity_date", { ascending: false });
 
@@ -483,7 +626,9 @@ async function renderActivities() {
       <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
       <td><b>${esc(a.customer)}</b></td>
-      <td>${esc(a.title)}${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
+      <td>${esc(a.title)}
+        ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
+        ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
       <td>${esc(staffName(a.created_by))}</td>
       <td style="font-size:12.5px">${parts.map(esc).join(", ") || "-"}</td>
       <td><span class="badge ${a.status === "approved" ? "approved" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
@@ -512,6 +657,8 @@ async function renderActivities() {
 
 function activityModal(edit = null) {
   const picked = new Set(edit ? (edit.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => p.staff_id) : []);
+  const pickedCos = new Set(edit ? (edit.activity_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(edit ? (edit.activity_contracts || []).map((c) => c.contract_id) : []);
   const options = STAFF.filter((s) => s.status === "active" && s.id !== ME.id);
   openModal(`
     <h3>${edit ? "Edit activity" : "New activity"}</h3>
@@ -524,7 +671,7 @@ function activityModal(edit = null) {
     <div class="field" id="aEndWrap" style="display:${edit?.type === "trip" ? "block" : "none"}">
       <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
-    <div class="field"><label>Customer</label><input id="aCust" value="${esc(edit?.customer || "")}" placeholder="e.g. Seaspan" /></div>
+    ${tagPanelHTML()}
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
     <div class="field"><label>Notes (optional)</label><textarea id="aNotes">${esc(edit?.notes || "")}</textarea></div>
     <div class="field"><label>Add participants (you are auto-registered as host)</label>
@@ -543,17 +690,19 @@ function activityModal(edit = null) {
     document.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { picked.delete(Number(b.dataset.rm)); drawChips(); }));
   };
   drawChips();
+  bindTagPanel(pickedCos, pickedCts);
   $("#aPickP").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
   $("#aType").onchange = () => { $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none"; };
 
   $("#aSave").onclick = async () => {
     const isTrip = $("#aType").value === "trip";
+    const coNames = [...pickedCos].map(companyName).filter(Boolean);
     const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
       end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
-      customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
+      customer: coNames.join(", ") || "Other", title: $("#aTitle").value.trim(),
       notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id,
       status: "pending" };
-    if (!rec.customer || !rec.title || !rec.activity_date) return alert("Customer, topic and date are required.");
+    if (!rec.title || !rec.activity_date) return alert("Topic and date are required.");
     if (isTrip && rec.end_date < rec.activity_date) return alert("Trip end date must be on or after the start date.");
 
     let actId;
@@ -571,6 +720,10 @@ function activityModal(edit = null) {
       ...[...picked].map((id) => ({ activity_id: actId, staff_id: id, p_role: "participant" }))];
     const { error: e2 } = await sb.from("activity_participants").insert(partRows);
     if (e2) return alert("Failed to save participants: " + e2.message);
+    await sb.from("activity_companies").delete().eq("activity_id", actId);
+    await sb.from("activity_contracts").delete().eq("activity_id", actId);
+    if (pickedCos.size) await sb.from("activity_companies").insert([...pickedCos].map((id) => ({ activity_id: actId, company_id: id })));
+    if (pickedCts.size) await sb.from("activity_contracts").insert([...pickedCts].map((id) => ({ activity_id: actId, contract_id: id })));
     closeModal(); renderActivities();
   };
 }
@@ -590,16 +743,19 @@ async function renderReports() {
       </div>
       ${isManager() ? `<button class="btn ghost sm" id="btnTags" style="margin-left:auto">🏷️ Manage tags</button>` : ""}
     </div>
-    <div class="section-head"><h2>Report list</h2><button class="btn" id="btnNewRep">+ New report</button></div>
+    <div class="section-head"><h2>Report list</h2><div style="display:flex;gap:8px">
+      ${isManager() ? `<button class="btn ghost" id="btnCompanies2">🏢 Companies</button>` : ""}
+      <button class="btn" id="btnNewRep">+ New report</button></div></div>
     <div class="card" style="padding:8px 14px" id="repList"><div class="empty">Loading...</div></div>`;
   $("#btnNewRep").onclick = () => reportModal();
+  if ($("#btnCompanies2")) $("#btnCompanies2").onclick = companiesModal;
   if ($("#btnTags")) $("#btnTags").onclick = tagsModal;
   document.querySelectorAll("#tagSeg [data-tag]").forEach((b) => (b.onclick = () => { repTagFilter = Number(b.dataset.tag); renderReports(); }));
   await drawReportList("#repList");
 }
 
 async function drawReportList(sel, onlySubmitted = false) {
-  let q = sb.from("reports").select("*, report_tags(tag_id)").order("updated_at", { ascending: false });
+  let q = sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").order("updated_at", { ascending: false });
   if (onlySubmitted) q = q.eq("status", "submitted");
   const { data } = await q;
   let reps = data || [];
@@ -653,6 +809,8 @@ async function tagsModal() {
 
 function reportModal(edit = null) {
   const pickedTags = new Set(edit ? (edit.report_tags || []).map((t) => t.tag_id) : []);
+  const pickedCos = new Set(edit ? (edit.report_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(edit ? (edit.report_contracts || []).map((c) => c.contract_id) : []);
   openModal(`
     <h3>${edit ? `Edit report (v${edit.version})` : "New meeting report"}</h3>
     <div class="row2">
@@ -663,7 +821,7 @@ function reportModal(edit = null) {
     ${TAGS.length ? `<div class="field"><label>Tags (optional, multiple)</label>
       <div class="chips">${TAGS.map((t) => `<span class="chip tagpick" data-tid="${t.id}" style="cursor:pointer;${pickedTags.has(t.id) ? "background:var(--navy);color:#fff" : ""}">${esc(t.name)}</span>`).join("")}</div>
     </div>` : ""}
-    <div class="field"><label>Customer / counterpart</label><input id="rCust" value="${esc(edit?.customer || "")}" placeholder="e.g. Seaspan — or team name for internal reports" /></div>
+    ${tagPanelHTML()}
     <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
     <div class="field"><label>Discussion</label><textarea id="rContent" style="min-height:160px">${esc(edit?.content || "")}</textarea></div>
     <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
@@ -671,17 +829,19 @@ function reportModal(edit = null) {
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="rSave">${edit ? "Save" : "Create (saved as draft)"}</button>
     </div>`);
+  bindTagPanel(pickedCos, pickedCts);
   document.querySelectorAll(".tagpick").forEach((c) => (c.onclick = () => {
     const id = Number(c.dataset.tid);
     if (pickedTags.has(id)) { pickedTags.delete(id); c.style.background = ""; c.style.color = ""; }
     else { pickedTags.add(id); c.style.background = "var(--navy)"; c.style.color = "#fff"; }
   }));
   $("#rSave").onclick = async () => {
-    const rec = { customer: $("#rCust").value.trim(), meeting_date: $("#rDate").value,
+    const coNames = [...pickedCos].map(companyName).filter(Boolean);
+    const rec = { customer: coNames.join(", ") || "Other", meeting_date: $("#rDate").value,
       report_type: $("#rType").value,
       title: $("#rTitle").value.trim(), content: $("#rContent").value,
       followup: $("#rFollow").value, updated_at: new Date().toISOString() };
-    if (!rec.customer || !rec.title) return alert("Customer and title are required.");
+    if (!rec.title) return alert("Title is required.");
     let repId;
     if (edit) {
       const { error } = await sb.from("reports").update(rec).eq("id", edit.id);
@@ -696,6 +856,10 @@ function reportModal(edit = null) {
     }
     await sb.from("report_tags").delete().eq("report_id", repId);
     if (pickedTags.size) await sb.from("report_tags").insert([...pickedTags].map((tid) => ({ report_id: repId, tag_id: tid })));
+    await sb.from("report_companies").delete().eq("report_id", repId);
+    await sb.from("report_contracts").delete().eq("report_id", repId);
+    if (pickedCos.size) await sb.from("report_companies").insert([...pickedCos].map((id) => ({ report_id: repId, company_id: id })));
+    if (pickedCts.size) await sb.from("report_contracts").insert([...pickedCts].map((id) => ({ report_id: repId, contract_id: id })));
     closeModal(); openReport(repId);
   };
 }
@@ -729,7 +893,7 @@ function diffWords(oldStr, newStr) {
 }
 
 async function openReport(id) {
-  const { data: r } = await sb.from("reports").select("*, report_tags(tag_id)").eq("id", id).single();
+  const { data: r } = await sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").eq("id", id).single();
   if (!r) return alert("Can't open this report (no permission).");
   openedReportId = id;
   const { data: events } = await sb.from("report_events").select("*").eq("report_id", id).order("created_at", { ascending: false });
@@ -764,6 +928,7 @@ async function openReport(id) {
       <div class="page-title">${esc(r.title)}</div>
       <span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
       ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(TAGS.find((x) => x.id === t.tag_id)?.name || "")}</span>`).join(" ")}
+      ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}
       <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
       <span class="badge part">v${r.version}</span>
     </div>
