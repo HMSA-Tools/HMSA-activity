@@ -2,7 +2,9 @@
    HMSA Sales Activity Dashboard - app.js
    Company-email login + admin approval + password reset
    ========================================================= */
-const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {
+  auth: { storage: window.sessionStorage, persistSession: true, autoRefreshToken: true },
+});
 
 const TYPE_LABEL = { meeting: "In-person Meeting", vc: "Video Call (VC)", trip: "Business Trip", other: "Other" };
 const TYPE_COLOR = { meeting: "#00a651", vc: "#2e7cf6", trip: "#f0a020", other: "#8a99a8" };
@@ -30,6 +32,71 @@ const fmtD = (d) => (d ? String(d).slice(0, 10) : "-");
 const fmtDT = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")} ${String(x.getHours()).padStart(2, "0")}:${String(x.getMinutes()).padStart(2, "0")}`; };
 const staffName = (id) => STAFF.find((s) => s.id === id)?.name || `#${id}`;
 const idEmail = (id) => `${id.trim().toLowerCase()}@${CONFIG.EMAIL_DOMAIN}`;
+
+/* =========================================================
+   IDLE LOCK: 4h of inactivity → soft lock (password re-entry).
+   Session lives in sessionStorage → closing the browser/tab = signed out.
+   ========================================================= */
+const IDLE_LIMIT_MS = 4 * 60 * 60 * 1000; // 4 hours, fixed
+let lastActivity = Date.now();
+let lockShown = false;
+let idleTimer = null;
+
+function noteActivity() {
+  if (lockShown) return;
+  const now = Date.now();
+  if (now - lastActivity > 5000) sessionStorage.setItem("hmsa_last_act", String(now));
+  lastActivity = now;
+}
+
+function startIdleWatch() {
+  const stored = Number(sessionStorage.getItem("hmsa_last_act") || 0);
+  if (stored) lastActivity = stored;
+  ["mousemove", "keydown", "click", "scroll", "touchstart"].forEach((ev) =>
+    document.addEventListener(ev, noteActivity, { passive: true }));
+  if (idleTimer) clearInterval(idleTimer);
+  idleTimer = setInterval(() => {
+    if (ME && !lockShown && Date.now() - lastActivity > IDLE_LIMIT_MS) showLock();
+  }, 30000);
+  if (ME && Date.now() - lastActivity > IDLE_LIMIT_MS) showLock();
+}
+
+function showLock() {
+  if (lockShown) return;
+  lockShown = true;
+  const ov = document.createElement("div");
+  ov.id = "lockOverlay";
+  ov.style.cssText = "position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;background:linear-gradient(160deg,#0a2a43 0%,#0e3a5e 55%,#0a4b3a 100%)";
+  ov.innerHTML = `
+    <div class="auth-card" style="max-width:380px">
+      <div style="font-size:34px;margin-bottom:8px">🔒</div>
+      <div style="font-weight:800;font-size:17px;margin-bottom:4px">Session locked</div>
+      <div style="font-size:13px;color:var(--ink-2);margin-bottom:18px">Locked after 4 hours of inactivity.<br/>Signed in as <b>${esc(ME.name)}</b> — enter your password to continue. Your unsaved work is preserved.</div>
+      <div id="lockMsg" class="msg"></div>
+      <div class="field"><label>Password</label><input id="lockPw" type="password" autocomplete="current-password" /></div>
+      <button class="btn block" id="lockGo">Unlock</button>
+      <div class="auth-alt"><a id="lockSwitch">Sign in as a different user</a></div>
+    </div>`;
+  document.body.appendChild(ov);
+  const doUnlock = async () => {
+    const pw = document.getElementById("lockPw").value;
+    if (!pw) return;
+    const { error } = await sb.auth.signInWithPassword({ email: idEmail(ME.login_id), password: pw });
+    if (error) {
+      const m = document.getElementById("lockMsg");
+      m.className = "msg err"; m.textContent = "Wrong password. Try again.";
+      return;
+    }
+    lastActivity = Date.now();
+    sessionStorage.setItem("hmsa_last_act", String(lastActivity));
+    lockShown = false;
+    ov.remove();
+  };
+  document.getElementById("lockGo").onclick = doUnlock;
+  document.getElementById("lockPw").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
+  document.getElementById("lockPw").focus();
+  document.getElementById("lockSwitch").onclick = async () => { await sb.auth.signOut(); location.reload(); };
+}
 
 function authMsg(text, ok = false) { const el = $("#authMsg"); el.className = "msg " + (ok ? "ok" : "err"); el.textContent = text; }
 function clearAuthMsg() { const el = $("#authMsg"); el.className = "msg"; el.textContent = ""; }
@@ -128,6 +195,8 @@ async function afterLogin() {
   $("#meRole").textContent = ROLE_LABEL[ME.role] + (ME.is_admin ? " · Admin" : "");
   if (ME.role === "leader" || ME.role === "director") $("#navReview").style.display = "flex";
   if (ME.is_admin) $("#navAdmin").style.display = "flex";
+  noteActivity();
+  startIdleWatch();
   switchView("dashboard");
 }
 
