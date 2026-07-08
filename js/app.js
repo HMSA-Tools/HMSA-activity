@@ -625,8 +625,10 @@ async function renderActivities() {
     return `<tr>
       <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
-      <td>${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ") || ""}
-        ${a.customer && a.customer !== "Other" ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.customer)}</div>` : (a.activity_companies || []).length ? "" : "-"}</td>
+      <td style="vertical-align:top">
+        ${(a.activity_companies || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}</div>` : ""}
+        ${a.customer && a.customer !== "Other" ? `<div style="font-size:11.5px;color:var(--ink-2);line-height:1.3">${esc(a.customer)}</div>` : (a.activity_companies || []).length ? "" : `<span style="color:var(--ink-2)">-</span>`}
+      </td>
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
         ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
@@ -765,11 +767,13 @@ async function drawReportList(sel, onlySubmitted = false) {
   const rows = reps.map((r) => `
     <tr class="clickable" data-open="${r.id}">
       <td style="white-space:nowrap">${fmtD(r.meeting_date)}</td>
-      <td><span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
-        ${(r.report_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ")}
-        ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}
-        ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join(" ")}</td>
-      <td>${r.customer && r.customer !== "Other" ? `<b>${esc(r.customer)}</b>` : "-"}</td>
+      <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:3px">
+        <span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
+        ${(r.report_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
+        ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join("")}
+        ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join("")}
+      </div></td>
+      <td style="vertical-align:top">${r.customer && r.customer !== "Other" ? `<b>${esc(r.customer)}</b>` : `<span style="color:var(--ink-2)">-</span>`}</td>
       <td>${esc(r.title)}</td>
       <td>${esc(staffName(r.author_id))} ${partBadge(r.part)}</td>
       <td>v${r.version}</td>
