@@ -1024,7 +1024,7 @@ async function openReport(id) {
 
   const isAuthor = r.author_id === ME.id;
   const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || isExec() || ME.is_admin;
-  const canEdit = (isAuthor && (r.status === "submitted" || r.status === "returned")) || (canReview && r.status === "submitted");
+  const canEdit = (isAuthor && (r.status === "submitted" || r.status === "returned")) || (canReview && (r.status === "submitted" || r.status === "returned"));
   const canRevoke = (isExec() || ME.is_admin) && r.status === "approved";
   const canSeeHistory = isAuthor || (ME.role === "leader" && ME.part === r.part) || isExec() || ME.is_admin;
   const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented", revoke: "revoked approval" };
@@ -1070,8 +1070,9 @@ async function openReport(id) {
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit${canReview && !isAuthor ? " (as reviewer)" : ""}${isAuthor && r.status === "returned" ? " & resubmit" : ""}</button>` : ""}
+          ${canReview && (r.status === "submitted" || r.status === "returned") ? `
+            <button class="btn" id="repApprove">✅ Approve</button>` : ""}
           ${canReview && r.status === "submitted" ? `
-            <button class="btn" id="repApprove">✅ Approve</button>
             <button class="btn danger" id="repReturn">↩️ Return (with reason)</button>` : ""}
           ${canRevoke ? `<button class="btn danger" id="repRevoke">🚫 Revoke approval (with remark)</button>` : ""}
 
