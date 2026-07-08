@@ -625,7 +625,8 @@ async function renderActivities() {
     return `<tr>
       <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
-      <td><b>${esc(a.customer)}</b></td>
+      <td>${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ") || ""}
+        ${a.customer && a.customer !== "Other" ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.customer)}</div>` : (a.activity_companies || []).length ? "" : "-"}</td>
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
         ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
@@ -672,6 +673,7 @@ function activityModal(edit = null) {
       <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
     ${tagPanelHTML()}
+    <div class="field"><label>Counterpart (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
     <div class="field"><label>Notes (optional)</label><textarea id="aNotes">${esc(edit?.notes || "")}</textarea></div>
     <div class="field"><label>Add participants (you are auto-registered as host)</label>
@@ -696,10 +698,9 @@ function activityModal(edit = null) {
 
   $("#aSave").onclick = async () => {
     const isTrip = $("#aType").value === "trip";
-    const coNames = [...pickedCos].map(companyName).filter(Boolean);
     const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
       end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
-      customer: coNames.join(", ") || "Other", title: $("#aTitle").value.trim(),
+      customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
       notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id,
       status: "pending" };
     if (!rec.title || !rec.activity_date) return alert("Topic and date are required.");
@@ -765,8 +766,10 @@ async function drawReportList(sel, onlySubmitted = false) {
     <tr class="clickable" data-open="${r.id}">
       <td style="white-space:nowrap">${fmtD(r.meeting_date)}</td>
       <td><span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
+        ${(r.report_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ")}
+        ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}
         ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join(" ")}</td>
-      <td><b>${esc(r.customer)}</b></td>
+      <td>${r.customer && r.customer !== "Other" ? `<b>${esc(r.customer)}</b>` : "-"}</td>
       <td>${esc(r.title)}</td>
       <td>${esc(staffName(r.author_id))} ${partBadge(r.part)}</td>
       <td>v${r.version}</td>
@@ -822,6 +825,7 @@ function reportModal(edit = null) {
       <div class="chips">${TAGS.map((t) => `<span class="chip tagpick" data-tid="${t.id}" style="cursor:pointer;${pickedTags.has(t.id) ? "background:var(--navy);color:#fff" : ""}">${esc(t.name)}</span>`).join("")}</div>
     </div>` : ""}
     ${tagPanelHTML()}
+    <div class="field"><label>Counterpart (optional, free text)</label><input id="rCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim — or team name for internal reports" /></div>
     <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
     <div class="field"><label>Discussion</label><textarea id="rContent" style="min-height:160px">${esc(edit?.content || "")}</textarea></div>
     <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
@@ -836,8 +840,7 @@ function reportModal(edit = null) {
     else { pickedTags.add(id); c.style.background = "var(--navy)"; c.style.color = "#fff"; }
   }));
   $("#rSave").onclick = async () => {
-    const coNames = [...pickedCos].map(companyName).filter(Boolean);
-    const rec = { customer: coNames.join(", ") || "Other", meeting_date: $("#rDate").value,
+    const rec = { customer: $("#rCust").value.trim(), meeting_date: $("#rDate").value,
       report_type: $("#rType").value,
       title: $("#rTitle").value.trim(), content: $("#rContent").value,
       followup: $("#rFollow").value, updated_at: new Date().toISOString() };
@@ -927,12 +930,13 @@ async function openReport(id) {
     <div style="display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap">
       <div class="page-title">${esc(r.title)}</div>
       <span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
-      ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(TAGS.find((x) => x.id === t.tag_id)?.name || "")}</span>`).join(" ")}
+      ${(r.report_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ")}
       ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}
+      ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(TAGS.find((x) => x.id === t.tag_id)?.name || "")}</span>`).join(" ")}
       <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
       <span class="badge part">v${r.version}</span>
     </div>
-    <div class="page-sub">${esc(r.customer)} · Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})</div>
+    <div class="page-sub">${r.customer && r.customer !== "Other" ? esc(r.customer) + " · " : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})</div>
 
     <div class="two-col">
       <div>
