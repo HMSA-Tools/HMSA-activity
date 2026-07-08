@@ -626,9 +626,9 @@ async function renderActivities() {
       <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
       <td style="vertical-align:top">
-        ${(a.activity_companies || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-bottom:2px">${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}</div>` : ""}
-        ${a.customer && a.customer !== "Other" ? `<div style="font-size:11.5px;color:var(--ink-2);line-height:1.3">${esc(a.customer)}</div>` : (a.activity_companies || []).length ? "" : `<span style="color:var(--ink-2)">-</span>`}
+        ${(a.activity_companies || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:3px">${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}</div>` : `<span style="color:var(--ink-2)">-</span>`}
       </td>
+      <td style="vertical-align:top">${a.customer && a.customer !== "Other" ? esc(a.customer) : `<span style="color:var(--ink-2)">-</span>`}</td>
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
         ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
@@ -642,7 +642,7 @@ async function renderActivities() {
     </tr>`;
   }).join("");
   $("#actList").innerHTML = rows
-    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Customer</th><th>Topic</th><th>Host</th><th>Participants</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Counterpart</th><th>Topic</th><th>Host</th><th>Participants</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">No activities in this period. Log your first one!</div>`;
 
   document.querySelectorAll("[data-appract]").forEach((b) => (b.onclick = async () => {
@@ -780,7 +780,7 @@ async function drawReportList(sel, onlySubmitted = false) {
       <td><span class="badge ${r.status}">${ST_LABEL[r.status]}</span></td>
     </tr>`).join("");
   $(sel).innerHTML = rows
-    ? `<table><thead><tr><th>Date</th><th>Type / Tags</th><th>Customer</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table><thead><tr><th>Date</th><th>Type / Tags</th><th>Counterpart</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">${onlySubmitted ? "No reports awaiting review." : "No reports match. Write your first one!"}</div>`;
   document.querySelectorAll("[data-open]").forEach((tr) => (tr.onclick = () => openReport(Number(tr.dataset.open))));
 }
