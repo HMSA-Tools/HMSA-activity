@@ -840,7 +840,7 @@ function activityModal(edit = null) {
 async function renderReports() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Reports</div>
-    <div class="page-sub">Counsel & internal reports. Draft → submit → approve/return. Everyone can read final reports; edit history is visible to reviewers.</div>
+    <div class="page-sub">Counsel & internal reports. Submitting is one step — write and it goes straight to your part leader. Everyone can read final reports; edit history is visible to reviewers.</div>
     ${searchBarHTML("rep")}
     <div class="filterbar" id="tagBar" style="display:${isManager() && TAGS.length ? "flex" : "none"}">
       <span style="font-size:12px;font-weight:700;color:var(--ink-2)">TAG FILTER</span>
@@ -946,7 +946,7 @@ function reportModal(edit = null, fromActivity = null) {
     <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn" id="rSave">${edit ? "Save" : "Create (saved as draft)"}</button>
+      <button class="btn" id="rSave">${edit ? (edit.status === "returned" ? "Save & resubmit" : "Save") : "Submit report"}</button>
     </div>`);
   bindTagPanel(pickedCos, pickedCts);
   document.querySelectorAll(".tagpick").forEach((c) => (c.onclick = () => {
@@ -962,15 +962,21 @@ function reportModal(edit = null, fromActivity = null) {
     if (!rec.title) return alert("Title is required.");
     let repId;
     if (edit) {
-      const { error } = await sb.from("reports").update(rec).eq("id", edit.id);
+      // 반송 상태에서 저장하면 자동 재제출 (버전 +1)
+      const resubmit = edit.status === "returned";
+      const upd = resubmit ? { ...rec, status: "submitted", version: edit.version + 1 } : rec;
+      const { error } = await sb.from("reports").update(upd).eq("id", edit.id);
       if (error) return alert("Save failed: " + error.message);
       repId = edit.id;
-      await logEvent(repId, "edit", null, edit.version, rec.content, rec.followup);
+      await logEvent(repId, "edit", null, resubmit ? edit.version + 1 : edit.version, rec.content, rec.followup);
+      if (resubmit) await logEvent(repId, "submit", null, edit.version + 1, rec.content, rec.followup);
     } else {
-      const { data, error } = await sb.from("reports").insert({ ...rec, author_id: ME.id, part: ME.part, activity_id: fromActivity?.id || null }).select("id").single();
+      // 등록 = 즉시 제출 (별도 Submit 단계 없음)
+      const { data, error } = await sb.from("reports").insert({ ...rec, status: "submitted", author_id: ME.id, part: ME.part, activity_id: fromActivity?.id || null }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
       repId = data.id;
       await logEvent(repId, "create", null, 1, rec.content, rec.followup);
+      await logEvent(repId, "submit", null, 1, rec.content, rec.followup);
     }
     await sb.from("report_tags").delete().eq("report_id", repId);
     if (pickedTags.size) await sb.from("report_tags").insert([...pickedTags].map((tid) => ({ report_id: repId, tag_id: tid })));
@@ -1018,8 +1024,7 @@ async function openReport(id) {
 
   const isAuthor = r.author_id === ME.id;
   const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || isExec() || ME.is_admin;
-  const canEdit = (isAuthor && (r.status === "draft" || r.status === "returned")) || (canReview && r.status === "submitted");
-  const canSubmit = isAuthor && (r.status === "draft" || r.status === "returned");
+  const canEdit = (isAuthor && (r.status === "submitted" || r.status === "returned")) || (canReview && r.status === "submitted");
   const canRevoke = (isExec() || ME.is_admin) && r.status === "approved";
   const canSeeHistory = isAuthor || (ME.role === "leader" && ME.part === r.part) || isExec() || ME.is_admin;
   const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented", revoke: "revoked approval" };
@@ -1064,13 +1069,12 @@ async function openReport(id) {
           <div class="report-content">${esc(r.followup) || "-"}</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
-          ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit${canReview && !isAuthor ? " (as reviewer)" : ""}</button>` : ""}
-          ${canSubmit ? `<button class="btn navy" id="repSubmit">📤 Submit to part leader</button>` : ""}
+          ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit${canReview && !isAuthor ? " (as reviewer)" : ""}${isAuthor && r.status === "returned" ? " & resubmit" : ""}</button>` : ""}
           ${canReview && r.status === "submitted" ? `
             <button class="btn" id="repApprove">✅ Approve</button>
             <button class="btn danger" id="repReturn">↩️ Return (with reason)</button>` : ""}
           ${canRevoke ? `<button class="btn danger" id="repRevoke">🚫 Revoke approval (with remark)</button>` : ""}
-          ${isAuthor && r.status === "draft" ? `<button class="btn ghost sm" id="repDel" style="color:var(--red)">Delete</button>` : ""}
+
         </div>
       </div>
       <div class="card">
@@ -1097,16 +1101,6 @@ async function openReport(id) {
 
   $("#backBtn").onclick = () => switchView(currentView === "review" ? "review" : "reports");
   if ($("#repEdit")) $("#repEdit").onclick = () => reportModal(r);
-  if ($("#repDel")) $("#repDel").onclick = async () => {
-    if (!confirm("Delete this draft report?")) return;
-    await sb.from("reports").delete().eq("id", r.id); switchView("reports");
-  };
-  if ($("#repSubmit")) $("#repSubmit").onclick = async () => {
-    const newVer = r.status === "returned" ? r.version + 1 : r.version;
-    const { error } = await sb.from("reports").update({ status: "submitted", version: newVer, updated_at: new Date().toISOString() }).eq("id", r.id);
-    if (error) return alert("Submit failed: " + error.message);
-    await logEvent(r.id, "submit", null, newVer, r.content, r.followup); openReport(r.id);
-  };
   if ($("#repApprove")) $("#repApprove").onclick = async () => {
     if (!confirm("Approve this report?")) return;
     await sb.from("reports").update({ status: "approved", updated_at: new Date().toISOString() }).eq("id", r.id);
