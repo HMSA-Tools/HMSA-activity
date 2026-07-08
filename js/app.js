@@ -8,10 +8,10 @@ const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, 
 
 const TYPE_LABEL = { meeting: "In-person Meeting", vc: "Video Call (VC)", trip: "Business Trip", other: "Other" };
 const TYPE_COLOR = { meeting: "#00a651", vc: "#2e7cf6", trip: "#f0a020", other: "#8a99a8" };
-const ROLE_LABEL = { member: "Member", leader: "Part Leader", director: "Director" };
+const ROLE_LABEL = { member: "Member", leader: "Part Leader", teamlead: "Team Lead", director: "Director" };
 const ST_LABEL   = { draft: "Draft", submitted: "Submitted", returned: "Returned", approved: "Approved" };
 const SS_LABEL   = { unclaimed: "Unclaimed", pending: "Pending", active: "Active", disabled: "Disabled" };
-const ACT_ST     = { pending: "Pending approval", approved: "Approved" };
+const ACT_ST     = { pending: "Pending approval", approved: "Approved", canceled: "Canceled" };
 const RTYPE_LABEL = { customer: "Customer Meeting", internal: "Internal" };
 let TAGS = [];        // tag catalog (created by leaders/director)
 let PARTS = [];       // parts catalog (managed by admin) — {id, name, color}
@@ -23,10 +23,34 @@ const PART_PALETTE = ["#00a651", "#2e7cf6", "#f0a020", "#9b59d0", "#e5568c", "#1
 const partColor = (name) => PARTS.find((p) => p.name === name)?.color || "#5a6b7d";
 const partBadge = (name) => { const c = partColor(name); return `<span class="badge" style="background:${c}1c;color:${c};border:1px solid ${c}44">${esc(name)}</span>`; };
 let repTagFilter = 0; // 0 = all
-const isManager = () => ME && (ME.role === "leader" || ME.role === "director" || ME.is_admin);
+let searchQ = { act: "", rep: "", rev: "" };
+let coFilter = { act: 0, rep: 0, rev: 0 }; // 0 = all companies
+function searchBarHTML(key) {
+  return `<div class="filterbar">
+    <input id="sb_${key}" value="${esc(searchQ[key])}" placeholder="🔍 Search title, PIC, author, content..." style="flex:1;min-width:180px;padding:8px 11px;border:1.5px solid var(--line);border-radius:8px" />
+    <select id="cf_${key}" style="max-width:190px">
+      <option value="0">🏢 All companies</option>
+      ${COMPANIES.map((c) => `<option value="${c.id}" ${coFilter[key] == c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+    </select>
+  </div>`;
+}
+function bindSearchBar(key, rerender) {
+  const inp = $("#sb_" + key);
+  let t = null;
+  inp.oninput = () => { clearTimeout(t); t = setTimeout(() => { searchQ[key] = inp.value; rerender(); }, 350); };
+  inp.onkeydown = (e) => { if (e.key === "Enter") { clearTimeout(t); searchQ[key] = inp.value; rerender(); } };
+  $("#cf_" + key).onchange = (e) => { coFilter[key] = Number(e.target.value); rerender(); };
+}
+function matchesSearch(q, ...fields) {
+  if (!q) return true;
+  const needle = q.toLowerCase();
+  return fields.some((f) => String(f || "").toLowerCase().includes(needle));
+}
+const isManager = () => ME && (ME.role === "leader" || ME.role === "teamlead" || ME.role === "director" || ME.is_admin);
 const halfKey = (d = new Date()) => `${d.getFullYear()}-H${d.getMonth() < 6 ? 1 : 2}`;
 const halfRange = (key) => { const [y, h] = key.split("-H"); return h === "1" ? { from: `${y}-01-01`, to: `${y}-06-30` } : { from: `${y}-07-01`, to: `${y}-12-31` }; };
-const canReviewActivity = (a) => (ME.role === "leader" && a.part === ME.part) || ME.role === "director" || ME.is_admin;
+const isExec = () => ME && (ME.role === "teamlead" || ME.role === "director");
+const canReviewActivity = (a) => (ME.role === "leader" && a.part === ME.part) || isExec() || ME.is_admin;
 
 let ME = null, STAFF = [], currentView = "dashboard", charts = [], openedReportId = null;
 
@@ -333,7 +357,7 @@ async function afterLogin() {
   $("#auth").style.display = "none"; $("#app").style.display = "block";
   $("#meName").textContent = ME.name; $("#mePart").textContent = ME.part;
   $("#meRole").textContent = ROLE_LABEL[ME.role] + (ME.is_admin ? " · Admin" : "");
-  if (ME.role === "leader" || ME.role === "director") $("#navReview").style.display = "flex";
+  if (ME.role === "leader" || ME.role === "teamlead" || ME.role === "director") $("#navReview").style.display = "flex";
   if (ME.is_admin) $("#navAdmin").style.display = "flex";
   noteActivity();
   startIdleWatch();
@@ -517,7 +541,7 @@ async function renderDashboard() {
             <td>${v.other}${gauge(p, "other")}</td></tr>`).join("") || `<tr><td colspan="5" class="empty">No data</td></tr>`}
           </tbody></table>
         </div>
-        <div class="card"><h2 style="font-size:15px;margin-bottom:10px">${isManager() ? "Review status" : "My reports"}</h2>${reviewHTML}</div>
+        <div class="card"><h2 style="font-size:15px;margin-bottom:10px">${isExec() || ME.is_admin ? "Approvals overview" : isManager() ? "Review status" : "My reports"}</h2>${reviewHTML}</div>
       </div>
     </div>
     ${showIndiv ? `
@@ -598,31 +622,55 @@ async function targetsModal() {
 async function renderActivities() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Activities</div>
-    <div class="page-sub">Log meetings, VCs and business trips. New/edited activities need leader approval before they count in the dashboard.</div>
+    <div class="page-sub">Log meetings, VCs and business trips. Each participant writes their own report — click 📝 to see who has.</div>
     ${periodBarHTML()}
+    ${searchBarHTML("act")}
     <div class="section-head"><h2>Activity list</h2><div style="display:flex;gap:8px">
       ${isManager() ? `<button class="btn ghost" id="btnCompanies">🏢 Companies</button>` : ""}
       <button class="btn" id="btnNewAct">+ New activity</button></div></div>
     <div class="card" style="padding:8px 14px" id="actList"><div class="empty">Loading...</div></div>`;
   bindPeriodBar(renderActivities);
+  bindSearchBar("act", renderActivities);
   $("#btnNewAct").onclick = () => activityModal();
   if ($("#btnCompanies")) $("#btnCompanies").onclick = companiesModal;
 
   const r = getRange();
-  const { data: acts } = await sb.from("activities")
+  const { data: actsRaw } = await sb.from("activities")
     .select("*, activity_participants(staff_id,p_role), activity_companies(company_id), activity_contracts(contract_id)")
     .gte("activity_date", r.from).lte("activity_date", r.to)
     .order("activity_date", { ascending: false });
+  let acts = actsRaw || [];
 
-  const rows = (acts || []).map((a) => {
-    const parts = (a.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => staffName(p.staff_id));
+  // linked reports for status board
+  const ids = acts.map((a) => a.id);
+  let linked = [];
+  if (ids.length) {
+    const { data: lr } = await sb.from("reports").select("id,activity_id,author_id,status").in("activity_id", ids);
+    linked = lr || [];
+  }
+  window.__actLinked = linked; window.__acts = acts;
+
+  // filters
+  acts = acts.filter((a) => {
+    if (coFilter.act && !(a.activity_companies || []).some((c) => c.company_id === coFilter.act)) return false;
+    const coNames = (a.activity_companies || []).map((c) => companyName(c.company_id)).join(" ");
+    return matchesSearch(searchQ.act, a.title, a.customer, a.notes, staffName(a.created_by), coNames);
+  });
+
+  const rows = acts.map((a) => {
+    const partIds = (a.activity_participants || []).map((p) => p.staff_id);
+    const partNames = (a.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => staffName(p.staff_id));
     const mine = a.created_by === ME.id;
+    const iAmIn = partIds.includes(ME.id);
     const reviewer = canReviewActivity(a);
+    const reps = linked.filter((x) => x.activity_id === a.id);
+    const done = reps.filter((x) => x.status === "approved").length;
+    const subm = reps.filter((x) => x.status === "submitted").length;
     const days = a.type === "trip" ? Math.round((new Date(a.end_date || a.activity_date) - new Date(a.activity_date)) / 86400000) + 1 : 1;
     const dateTxt = a.type === "trip" && a.end_date && a.end_date !== a.activity_date
       ? `${fmtD(a.activity_date)} ~ ${fmtD(a.end_date)} <span style="font-size:11px;color:var(--ink-2)">(${days}d)</span>`
       : fmtD(a.activity_date);
-    return `<tr>
+    return `<tr style="${a.status === "canceled" ? "opacity:.55" : ""}">
       <td style="white-space:nowrap">${dateTxt}</td>
       <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
       <td style="vertical-align:top">
@@ -631,31 +679,86 @@ async function renderActivities() {
       <td style="vertical-align:top">${a.customer && a.customer !== "Other" ? esc(a.customer) : `<span style="color:var(--ink-2)">-</span>`}</td>
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
-        ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}</td>
+        ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}
+        ${a.status === "canceled" && a.cancel_reason ? `<div style="font-size:12px;color:var(--red)">✖ ${esc(a.cancel_reason)}</div>` : ""}</td>
       <td>${esc(staffName(a.created_by))}</td>
-      <td style="font-size:12.5px">${parts.map(esc).join(", ") || "-"}</td>
-      <td><span class="badge ${a.status === "approved" ? "approved" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
+      <td style="font-size:12.5px">${partNames.map(esc).join(", ") || "-"}</td>
+      <td><button class="btn ghost sm" data-repstat="${a.id}" style="white-space:nowrap">📝 ${done + subm}/${partIds.length}</button></td>
+      <td><span class="badge ${a.status === "approved" ? "approved" : a.status === "canceled" ? "returned" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
       <td style="white-space:nowrap">
         ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button> ` : ""}
-        ${mine ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-del="${a.id}">Delete</button>` : ""}
+        ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button> ` : ""}
+        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button> <button class="btn ghost sm" data-del="${a.id}">Delete</button>` : ""}
+        ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
       </td>
     </tr>`;
   }).join("");
   $("#actList").innerHTML = rows
-    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Counterpart</th><th>Topic</th><th>Host</th><th>Participants</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<div class="empty">No activities in this period. Log your first one!</div>`;
+    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Customer PIC</th><th>Topic</th><th>Host</th><th>Participants</th><th>Reports</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">No activities match. Log your first one!</div>`;
 
   document.querySelectorAll("[data-appract]").forEach((b) => (b.onclick = async () => {
     const { error } = await sb.from("activities").update({ status: "approved" }).eq("id", b.dataset.appract);
     if (error) return alert("Approve failed: " + error.message);
     renderActivities();
   }));
-  document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => activityModal((acts || []).find((a) => a.id == b.dataset.edit))));
+  document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => activityModal(window.__acts.find((a) => a.id == b.dataset.edit))));
+  document.querySelectorAll("[data-resched]").forEach((b) => (b.onclick = () => {
+    const src = window.__acts.find((a) => a.id == b.dataset.resched);
+    activityModal({ ...src, id: null, status: "pending", cancel_reason: null, _copyOf: src.id });
+  }));
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-    if (!confirm("Delete this activity?")) return;
+    if (!confirm("Delete this activity? (Use Cancel instead if it was called off — that keeps the record.)")) return;
     await sb.from("activities").delete().eq("id", b.dataset.del);
     renderActivities();
   }));
+  document.querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = () => cancelActivityModal(Number(b.dataset.cancel))));
+  document.querySelectorAll("[data-repstat]").forEach((b) => (b.onclick = () => reportStatusModal(Number(b.dataset.repstat))));
+  document.querySelectorAll("[data-myrep]").forEach((b) => (b.onclick = () => openMyReportFor(Number(b.dataset.myrep))));
+}
+
+function cancelActivityModal(actId) {
+  openModal(`
+    <h3>Cancel activity</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Canceling keeps the record (excluded from stats) so it can be rescheduled later. Deleting removes it entirely.</p>
+    <div class="field"><label>Cancel reason (remark)</label><textarea id="cxReason" style="min-height:100px" placeholder="e.g. Customer postponed to August — reschedule needed."></textarea></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Back</button><button class="btn danger" id="cxGo">Cancel activity</button></div>`);
+  $("#cxGo").onclick = async () => {
+    const reason = $("#cxReason").value.trim();
+    if (!reason) return alert("Enter a cancel reason.");
+    const { error } = await sb.from("activities").update({ status: "canceled", cancel_reason: reason }).eq("id", actId);
+    if (error) return alert("Cancel failed: " + error.message);
+    closeModal(); renderActivities();
+  };
+}
+
+function reportStatusModal(actId) {
+  const a = window.__acts.find((x) => x.id === actId);
+  const reps = (window.__actLinked || []).filter((x) => x.activity_id === actId);
+  const partIds = (a.activity_participants || []).map((p) => p.staff_id);
+  openModal(`
+    <h3>📝 Report status — ${esc(a.title)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Every participant writes their own report for this activity.</p>
+    <table><thead><tr><th>Participant</th><th>Report</th><th></th></tr></thead><tbody>
+    ${partIds.map((sid) => {
+      const rep = reps.find((x) => x.author_id === sid);
+      return `<tr>
+        <td><b>${esc(staffName(sid))}</b>${sid === ME.id ? ' <span style="font-size:11px;color:var(--green-dark)">you</span>' : ""}</td>
+        <td>${rep ? `<span class="badge ${rep.status}">${ST_LABEL[rep.status]}</span>` : `<span class="badge returned">Not written</span>`}</td>
+        <td>${rep ? `<button class="btn ghost sm" data-openrep="${rep.id}">Open</button>` : sid === ME.id ? `<button class="btn sm" data-writerep="${actId}">Write mine</button>` : ""}</td>
+      </tr>`;
+    }).join("")}
+    </tbody></table>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+  document.querySelectorAll("[data-openrep]").forEach((b) => (b.onclick = () => { closeModal(); openReport(Number(b.dataset.openrep)); }));
+  document.querySelectorAll("[data-writerep]").forEach((b) => (b.onclick = () => { closeModal(); openMyReportFor(Number(b.dataset.writerep)); }));
+}
+
+async function openMyReportFor(actId) {
+  const { data: existing } = await sb.from("reports").select("id").eq("activity_id", actId).eq("author_id", ME.id).maybeSingle();
+  if (existing) return openReport(existing.id);
+  const a = window.__acts.find((x) => x.id === actId);
+  reportModal(null, a); // prefilled from activity
 }
 
 function activityModal(edit = null) {
@@ -664,8 +767,8 @@ function activityModal(edit = null) {
   const pickedCts = new Set(edit ? (edit.activity_contracts || []).map((c) => c.contract_id) : []);
   const options = STAFF.filter((s) => s.status === "active" && s.id !== ME.id);
   openModal(`
-    <h3>${edit ? "Edit activity" : "New activity"}</h3>
-    ${edit && edit.status === "approved" ? `<p style="font-size:12.5px;color:var(--amber);margin-bottom:10px">⚠️ Editing an approved activity sends it back to Pending for re-approval.</p>` : ""}
+    <h3>${edit && edit.id ? "Edit activity" : edit && edit._copyOf ? "Reschedule activity" : "New activity"}</h3>
+    ${edit && edit.id && edit.status === "approved" ? `<p style="font-size:12.5px;color:var(--amber);margin-bottom:10px">⚠️ Editing an approved activity sends it back to Pending for re-approval.</p>` : ""}
     <div class="row2">
       <div class="field"><label>Type</label><select id="aType">
         ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -675,7 +778,7 @@ function activityModal(edit = null) {
       <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
     ${tagPanelHTML()}
-    <div class="field"><label>Counterpart (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
+    <div class="field"><label>Customer PIC (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
     <div class="field"><label>Notes (optional)</label><textarea id="aNotes">${esc(edit?.notes || "")}</textarea></div>
     <div class="field"><label>Add participants (you are auto-registered as host)</label>
@@ -709,7 +812,7 @@ function activityModal(edit = null) {
     if (isTrip && rec.end_date < rec.activity_date) return alert("Trip end date must be on or after the start date.");
 
     let actId;
-    if (edit) {
+    if (edit && edit.id) {
       const { error } = await sb.from("activities").update(rec).eq("id", edit.id);
       if (error) return alert("Save failed: " + error.message);
       actId = edit.id;
@@ -736,8 +839,9 @@ function activityModal(edit = null) {
    ========================================================= */
 async function renderReports() {
   const main = $("#main");
-  main.innerHTML = `<div class="page-title">Meeting Reports</div>
-    <div class="page-sub">Draft → submit to part leader → approve/return. Leaders can edit directly — all changes are tracked.</div>
+  main.innerHTML = `<div class="page-title">Reports</div>
+    <div class="page-sub">Counsel & internal reports. Draft → submit → approve/return. Everyone can read final reports; edit history is visible to reviewers.</div>
+    ${searchBarHTML("rep")}
     <div class="filterbar" id="tagBar" style="display:${isManager() && TAGS.length ? "flex" : "none"}">
       <span style="font-size:12px;font-weight:700;color:var(--ink-2)">TAG FILTER</span>
       <div class="seg" id="tagSeg">
@@ -750,6 +854,7 @@ async function renderReports() {
       ${isManager() ? `<button class="btn ghost" id="btnCompanies2">🏢 Companies</button>` : ""}
       <button class="btn" id="btnNewRep">+ New report</button></div></div>
     <div class="card" style="padding:8px 14px" id="repList"><div class="empty">Loading...</div></div>`;
+  bindSearchBar("rep", renderReports);
   $("#btnNewRep").onclick = () => reportModal();
   if ($("#btnCompanies2")) $("#btnCompanies2").onclick = companiesModal;
   if ($("#btnTags")) $("#btnTags").onclick = tagsModal;
@@ -758,11 +863,15 @@ async function renderReports() {
 }
 
 async function drawReportList(sel, onlySubmitted = false) {
+  const key = onlySubmitted ? "rev" : "rep";
   let q = sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").order("updated_at", { ascending: false });
   if (onlySubmitted) q = q.eq("status", "submitted");
   const { data } = await q;
   let reps = data || [];
   if (!onlySubmitted && repTagFilter) reps = reps.filter((r) => (r.report_tags || []).some((t) => t.tag_id === repTagFilter));
+  if (coFilter[key]) reps = reps.filter((r) => (r.report_companies || []).some((c) => c.company_id === coFilter[key]));
+  if (searchQ[key]) reps = reps.filter((r) => matchesSearch(searchQ[key], r.title, r.customer, r.content, r.followup, staffName(r.author_id),
+    (r.report_companies || []).map((c) => companyName(c.company_id)).join(" ")));
   const tagName = (id) => TAGS.find((t) => t.id === id)?.name || "";
   const rows = reps.map((r) => `
     <tr class="clickable" data-open="${r.id}">
@@ -814,23 +923,25 @@ async function tagsModal() {
   };
 }
 
-function reportModal(edit = null) {
+function reportModal(edit = null, fromActivity = null) {
   const pickedTags = new Set(edit ? (edit.report_tags || []).map((t) => t.tag_id) : []);
-  const pickedCos = new Set(edit ? (edit.report_companies || []).map((c) => c.company_id) : []);
-  const pickedCts = new Set(edit ? (edit.report_contracts || []).map((c) => c.contract_id) : []);
+  const pickedCos = new Set(edit ? (edit.report_companies || []).map((c) => c.company_id)
+    : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(edit ? (edit.report_contracts || []).map((c) => c.contract_id)
+    : fromActivity ? (fromActivity.activity_contracts || []).map((c) => c.contract_id) : []);
   openModal(`
-    <h3>${edit ? `Edit report (v${edit.version})` : "New meeting report"}</h3>
+    <h3>${edit ? `Edit report (v${edit.version})` : fromActivity ? `Report for: ${esc(fromActivity.title)}` : "New report"}</h3>
     <div class="row2">
       <div class="field"><label>Report type</label><select id="rType">
         ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.report_type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
-      <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || new Date().toISOString().slice(0, 10)}" /></div>
+      <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || fromActivity?.activity_date || new Date().toISOString().slice(0, 10)}" /></div>
     </div>
     ${TAGS.length ? `<div class="field"><label>Tags (optional, multiple)</label>
       <div class="chips">${TAGS.map((t) => `<span class="chip tagpick" data-tid="${t.id}" style="cursor:pointer;${pickedTags.has(t.id) ? "background:var(--navy);color:#fff" : ""}">${esc(t.name)}</span>`).join("")}</div>
     </div>` : ""}
     ${tagPanelHTML()}
-    <div class="field"><label>Counterpart (optional, free text)</label><input id="rCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim — or team name for internal reports" /></div>
-    <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
+    <div class="field"><label>Customer PIC (optional, free text)</label><input id="rCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || fromActivity?.customer || "")}" placeholder="e.g. Capt. Kim — or team name for internal reports" /></div>
+    <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || fromActivity?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
     <div class="field"><label>Discussion</label><textarea id="rContent" style="min-height:160px">${esc(edit?.content || "")}</textarea></div>
     <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
     <div class="modal-actions">
@@ -856,7 +967,7 @@ function reportModal(edit = null) {
       repId = edit.id;
       await logEvent(repId, "edit", null, edit.version, rec.content, rec.followup);
     } else {
-      const { data, error } = await sb.from("reports").insert({ ...rec, author_id: ME.id, part: ME.part }).select("id").single();
+      const { data, error } = await sb.from("reports").insert({ ...rec, author_id: ME.id, part: ME.part, activity_id: fromActivity?.id || null }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
       repId = data.id;
       await logEvent(repId, "create", null, 1, rec.content, rec.followup);
@@ -906,11 +1017,13 @@ async function openReport(id) {
   const { data: events } = await sb.from("report_events").select("*").eq("report_id", id).order("created_at", { ascending: false });
 
   const isAuthor = r.author_id === ME.id;
-  const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || ME.role === "director" || ME.is_admin;
+  const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || isExec() || ME.is_admin;
   const canEdit = (isAuthor && (r.status === "draft" || r.status === "returned")) || (canReview && r.status === "submitted");
   const canSubmit = isAuthor && (r.status === "draft" || r.status === "returned");
-  const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented" };
-  const dotCls = { submit: "submit", return: "return", approve: "approve" };
+  const canRevoke = (isExec() || ME.is_admin) && r.status === "approved";
+  const canSeeHistory = isAuthor || (ME.role === "leader" && ME.part === r.part) || isExec() || ME.is_admin;
+  const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented", revoke: "revoked approval" };
+  const dotCls = { submit: "submit", return: "return", approve: "approve", revoke: "return" };
 
   // Build diffs: for each edit event, compare with the previous snapshot (chronological)
   const asc = [...(events || [])].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
@@ -940,7 +1053,7 @@ async function openReport(id) {
       <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
       <span class="badge part">v${r.version}</span>
     </div>
-    <div class="page-sub">${r.customer && r.customer !== "Other" ? esc(r.customer) + " · " : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})</div>
+    <div class="page-sub">${r.customer && r.customer !== "Other" ? "PIC: " + esc(r.customer) + " · " : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})${r.activity_id ? " · 🔗 linked to activity" : ""}</div>
 
     <div class="two-col">
       <div>
@@ -956,12 +1069,14 @@ async function openReport(id) {
           ${canReview && r.status === "submitted" ? `
             <button class="btn" id="repApprove">✅ Approve</button>
             <button class="btn danger" id="repReturn">↩️ Return (with reason)</button>` : ""}
+          ${canRevoke ? `<button class="btn danger" id="repRevoke">🚫 Revoke approval (with remark)</button>` : ""}
           ${isAuthor && r.status === "draft" ? `<button class="btn ghost sm" id="repDel" style="color:var(--red)">Delete</button>` : ""}
         </div>
       </div>
       <div class="card">
         <h2 style="font-size:14px;margin-bottom:6px">History</h2>
-        <div class="timeline">
+        ${canSeeHistory ? "" : `<div class="empty" style="padding:14px 6px">Edit history and review comments are visible to the author and reviewers only.</div>`}
+        <div class="timeline" style="${canSeeHistory ? "" : "display:none"}">
           ${(events || []).map((e) => `
             <div class="tl-item">
               <div class="tl-dot ${dotCls[e.action] || ""}"></div>
@@ -997,6 +1112,20 @@ async function openReport(id) {
     await sb.from("reports").update({ status: "approved", updated_at: new Date().toISOString() }).eq("id", r.id);
     await logEvent(r.id, "approve", null, r.version); openReport(r.id);
   };
+  if ($("#repRevoke")) $("#repRevoke").onclick = () => {
+    openModal(`
+      <h3>Revoke approval</h3>
+      <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">Team Lead / Director only. The report returns to the author for revision, and the revoke appears on the dashboard.</p>
+      <div class="field"><label>Remark (why is the approval revoked?)</label><textarea id="rvReason" style="min-height:110px"></textarea></div>
+      <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Back</button><button class="btn danger" id="rvGo">Revoke</button></div>`);
+    $("#rvGo").onclick = async () => {
+      const reason = $("#rvReason").value.trim();
+      if (!reason) return alert("Enter a remark.");
+      await sb.from("reports").update({ status: "returned", updated_at: new Date().toISOString() }).eq("id", r.id);
+      await logEvent(r.id, "revoke", reason, r.version);
+      closeModal(); openReport(r.id);
+    };
+  };
   if ($("#repReturn")) $("#repReturn").onclick = () => {
     openModal(`
       <h3>Return report</h3>
@@ -1017,10 +1146,12 @@ async function openReport(id) {
    ========================================================= */
 async function renderReview() {
   const main = $("#main");
-  const sub = ME.role === "director" ? "Submitted reports from all parts" : `${ME.part} — submitted reports`;
-  main.innerHTML = `<div class="page-title">Review Inbox</div>
+  const sub = isExec() ? "Submitted reports from all parts" : `${ME.part} — submitted reports`;
+  main.innerHTML = `<div class="page-title">Pending Approvals</div>
     <div class="page-sub">${esc(sub)}</div>
+    ${searchBarHTML("rev")}
     <div class="card" style="padding:8px 14px" id="revList"><div class="empty">Loading...</div></div>`;
+  bindSearchBar("rev", renderReview);
   await drawReportList("#revList", true);
 }
 
