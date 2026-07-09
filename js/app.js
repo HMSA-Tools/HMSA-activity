@@ -193,6 +193,165 @@ function companiesModal() {
 }
 
 /* =========================================================
+   PLAN CALENDAR (v7): leaders confirm member-submitted plans
+   ========================================================= */
+var planMonth = (() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); })();
+
+async function renderPlan() {
+  const main = $("#main");
+  const y = planMonth.getFullYear(), m = planMonth.getMonth();
+  const from = `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  const lastDay = new Date(y, m + 1, 0).getDate();
+  const to = `${y}-${String(m + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+
+  main.innerHTML = `<div class="page-title">Plan Calendar</div>
+    <div class="page-sub">Part leaders confirm plans. Members submit plans for leader confirmation. Activities matching a plan score 1x — unplanned extra activities score ×2.</div>
+    <div class="filterbar" style="align-items:center">
+      <button class="btn ghost sm" id="plPrev">◀</button>
+      <b style="font-size:15px;min-width:120px;text-align:center">${y}. ${String(m + 1).padStart(2, "0")}</b>
+      <button class="btn ghost sm" id="plNext">▶</button>
+      <button class="btn ghost sm" id="plToday">Today</button>
+      <button class="btn" id="plNew" style="margin-left:auto">+ New plan</button>
+    </div>
+    <div id="plPendingWrap"></div>
+    <div class="card" style="padding:12px">
+      <div class="plan-grid" style="margin-bottom:4px">
+        ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d) => `<div class="plan-dow">${d}</div>`).join("")}
+      </div>
+      <div class="plan-grid" id="plGrid"><div class="empty" style="grid-column:1/8">Loading...</div></div>
+    </div>`;
+  $("#plPrev").onclick = () => { planMonth = new Date(y, m - 1, 1); renderPlan(); };
+  $("#plNext").onclick = () => { planMonth = new Date(y, m + 1, 1); renderPlan(); };
+  $("#plToday").onclick = () => { const d = new Date(); planMonth = new Date(d.getFullYear(), d.getMonth(), 1); renderPlan(); };
+  $("#plNew").onclick = () => planModal();
+
+  const { data: plansRaw } = await sb.from("plans")
+    .select("*, plan_participants(staff_id)")
+    .gte("plan_date", from).lte("plan_date", to)
+    .order("plan_date").order("plan_time");
+  const plans = plansRaw || [];
+  window.__plans = plans;
+
+  // leader/exec: pending confirmation strip
+  if (isManager()) {
+    const pend = plans.filter((p) => p.status === "pending" && (ME.role !== "leader" || p.part === ME.part));
+    if (pend.length) {
+      $("#plPendingWrap").innerHTML = `<div class="card" style="margin-bottom:12px;border-left:4px solid var(--amber)">
+        <b style="font-size:13.5px">⏳ ${pend.length} plan(s) awaiting your confirmation</b>
+        ${pend.map((p) => `<div data-plopen="${p.id}" style="cursor:pointer;font-size:12.5px;padding:4px 0;border-bottom:1px dashed var(--line)">
+          ${fmtD(p.plan_date)}${p.plan_time ? " " + p.plan_time.slice(0, 5) : ""} · <b>${esc(p.title)}</b> ${partBadge(p.part)} <span style="color:var(--ink-2)">${esc(staffName(p.created_by))}</span></div>`).join("")}
+      </div>`;
+    }
+  }
+
+  const firstDow = new Date(y, m, 1).getDay();
+  const todayStr = new Date().toISOString().slice(0, 10);
+  let cells = "";
+  for (let i = 0; i < firstDow; i++) cells += `<div class="plan-cell dim"></div>`;
+  for (let d = 1; d <= lastDay; d++) {
+    const ds = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    const dayPlans = plans.filter((p) => p.plan_date === ds);
+    cells += `<div class="plan-cell ${ds === todayStr ? "today" : ""}" data-plday="${ds}">
+      <div class="plan-day">${d}</div>
+      ${dayPlans.map((p) => `<span class="plan-chip ${p.status}" data-plopen="${p.id}" style="border-left-color:${partColor(p.part)}" title="${esc(p.title)}">${p.status === "pending" ? "⏳ " : ""}${p.plan_time ? p.plan_time.slice(0, 5) + " " : ""}${esc(p.title)}</span>`).join("")}
+    </div>`;
+  }
+  $("#plGrid").innerHTML = cells;
+
+  document.querySelectorAll("[data-plday]").forEach((c) => (c.onclick = (e) => {
+    if (e.target.closest("[data-plopen]")) return;
+    planModal(null, c.dataset.plday);
+  }));
+  document.querySelectorAll("[data-plopen]").forEach((el) => (el.onclick = (e) => {
+    e.stopPropagation();
+    planDetailModal(window.__plans.find((p) => p.id == el.dataset.plopen));
+  }));
+}
+
+function planModal(edit = null, presetDate = null) {
+  const picked = new Set(edit ? (edit.plan_participants || []).map((p) => p.staff_id) : [ME.id]);
+  const active = STAFF.filter((x) => x.status === "active");
+  const autoConfirm = isManager();
+  openModal(`
+    <h3>${edit ? "Edit plan" : "New plan"}</h3>
+    ${autoConfirm ? "" : `<p style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">Your plan will be sent to your part leader for confirmation.</p>`}
+    <div class="row2">
+      <div class="field"><label>Date</label><input type="date" id="plDate" value="${edit?.plan_date || presetDate || new Date().toISOString().slice(0, 10)}" /></div>
+      <div class="field"><label>Time (optional)</label><input type="time" id="plTime" value="${edit?.plan_time ? edit.plan_time.slice(0, 5) : ""}" /></div>
+    </div>
+    <div class="field"><label>Meeting title / agenda</label><input id="plTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 7K LTSA follow-up call" /></div>
+    <div class="field"><label>Participants</label>
+      <div class="chips" id="plChips"></div>
+      <select id="plPick"><option value="">+ Add participant...</option>
+        ${active.map((x) => `<option value="${x.id}">${esc(x.name)} (${esc(x.part)})</option>`).join("")}</select>
+    </div>
+    <div class="field"><label>Notes (optional)</label><textarea id="plNotes">${esc(edit?.notes || "")}</textarea></div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="plSave">${edit ? "Save" : autoConfirm ? "Create (confirmed)" : "Submit for confirmation"}</button>
+    </div>`);
+  const drawChips = () => {
+    $("#plChips").innerHTML = [...picked].map((id) =>
+      `<span class="chip">${esc(staffName(id))}${id !== ME.id || picked.size > 1 ? `<button data-rm="${id}">×</button>` : ""}</span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">No participants</span>`;
+    document.querySelectorAll("#plChips [data-rm]").forEach((b) => (b.onclick = () => { picked.delete(Number(b.dataset.rm)); drawChips(); }));
+  };
+  drawChips();
+  $("#plPick").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
+  $("#plSave").onclick = async () => {
+    const rec = { title: $("#plTitle").value.trim(), plan_date: $("#plDate").value,
+      plan_time: $("#plTime").value || null, notes: $("#plNotes").value.trim() || null };
+    if (!rec.title || !rec.plan_date) return alert("Title and date are required.");
+    let planId;
+    if (edit) {
+      const { error } = await sb.from("plans").update(rec).eq("id", edit.id);
+      if (error) return alert("Save failed: " + error.message);
+      planId = edit.id;
+    } else {
+      const { data, error } = await sb.from("plans")
+        .insert({ ...rec, part: ME.part, created_by: ME.id, status: autoConfirm ? "confirmed" : "pending" })
+        .select("id").single();
+      if (error) return alert("Save failed: " + error.message);
+      planId = data.id;
+    }
+    await sb.from("plan_participants").delete().eq("plan_id", planId);
+    if (picked.size) await sb.from("plan_participants").insert([...picked].map((sid) => ({ plan_id: planId, staff_id: sid })));
+    closeModal(); renderPlan();
+  };
+}
+
+function planDetailModal(p) {
+  if (!p) return;
+  const canConfirm = p.status === "pending" && ((ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin);
+  const canEdit = (p.created_by === ME.id && p.status === "pending") || (ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin;
+  openModal(`
+    <h3>${p.status === "pending" ? "⏳ " : "📅 "}${esc(p.title)}</h3>
+    <div style="font-size:13px;color:var(--ink-2);margin-bottom:12px">
+      ${fmtD(p.plan_date)}${p.plan_time ? " · " + p.plan_time.slice(0, 5) : ""} · ${partBadge(p.part)} ·
+      <span class="badge ${p.status === "confirmed" ? "approved" : "pending"}">${p.status === "confirmed" ? "Confirmed" : "Pending confirmation"}</span>
+    </div>
+    <div class="field"><label>Participants</label>
+      <div class="chips">${(p.plan_participants || []).map((x) => `<span class="chip">${esc(staffName(x.staff_id))}</span>`).join("") || "-"}</div></div>
+    ${p.notes ? `<div class="field"><label>Notes</label><div style="white-space:pre-wrap;font-size:13.5px">${esc(p.notes)}</div></div>` : ""}
+    <div style="font-size:12px;color:var(--ink-2)">Created by ${esc(staffName(p.created_by))}</div>
+    <div class="modal-actions">
+      ${canEdit ? `<button class="btn ghost" id="plDel" style="color:var(--red)">Delete</button><button class="btn ghost" id="plEdit">Edit</button>` : ""}
+      ${canConfirm ? `<button class="btn" id="plConfirm">✅ Confirm plan</button>` : ""}
+      <button class="btn ${canConfirm ? "ghost" : ""}" onclick="closeModal()">Close</button>
+    </div>`);
+  if ($("#plConfirm")) $("#plConfirm").onclick = async () => {
+    const { error } = await sb.from("plans").update({ status: "confirmed" }).eq("id", p.id);
+    if (error) return alert("Confirm failed: " + error.message);
+    closeModal(); renderPlan();
+  };
+  if ($("#plEdit")) $("#plEdit").onclick = () => planModal(p);
+  if ($("#plDel")) $("#plDel").onclick = async () => {
+    if (!confirm("Delete this plan?")) return;
+    await sb.from("plans").delete().eq("id", p.id);
+    closeModal(); renderPlan();
+  };
+}
+
+/* =========================================================
    IDLE LOCK: 4h of inactivity → soft lock (password re-entry).
    Session lives in sessionStorage → closing the browser/tab = signed out.
    ========================================================= */
@@ -391,7 +550,7 @@ function switchView(v) {
   currentView = v; openedReportId = null;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   charts.forEach((c) => c.destroy()); charts = [];
-  ({ dashboard: renderDashboard, activities: renderActivities, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard)();
+  ({ dashboard: renderDashboard, activities: renderActivities, plan: renderPlan, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard)();
 }
 
 /* ---------------- Period helpers ---------------- */
@@ -437,16 +596,26 @@ async function renderDashboard() {
 
   const r = getRange();
   const hk = halfKey(), hr = halfRange(hk);
-  const [compQ, partQ, indivQ, targetQ, halfPartQ] = await Promise.all([
+  const yr = new Date().getFullYear();
+  const yFrom = `${yr}-01-01`, yTo = `${yr}-12-31`;
+  const wkStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
+  const wkEnd = (() => { const d = new Date(wkStart); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10); })();
+  const [compQ, partQ, indivQ, targetQ, halfPartQ, scoreQ, pScoreQ, sTgtQ, wkPlanQ] = await Promise.all([
     sb.rpc("company_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("part_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("activity_stats", { p_from: r.from, p_to: r.to }),
     sb.from("targets").select("*").eq("half", hk),
     sb.rpc("part_stats", { p_from: hr.from, p_to: hr.to }),
+    sb.rpc("score_stats", { p_from: yFrom, p_to: yTo }),
+    sb.rpc("part_scores", { p_from: yFrom, p_to: yTo }),
+    sb.from("score_targets").select("*").eq("year", yr),
+    sb.from("plans").select("*, plan_participants(staff_id)").eq("status", "confirmed").gte("plan_date", wkStart).lte("plan_date", wkEnd).order("plan_date").order("plan_time"),
   ]);
   if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
   const comp = compQ.data || [], partRows = partQ.data || [], indiv = indivQ.data || [];
   const targets = targetQ.data || [], halfPart = halfPartQ.data || [];
+  const scores = scoreQ.data || [], pScores = pScoreQ.data || [], sTgts = sTgtQ.data || [];
+  const myWkPlans = (wkPlanQ.data || []).filter((p) => (p.plan_participants || []).some((x) => x.staff_id === ME.id) || p.created_by === ME.id);
   const types = ["meeting", "vc", "trip", "other"];
 
   // ----- company KPI -----
@@ -528,6 +697,37 @@ async function renderDashboard() {
       </div>
       <div>
         <div class="card" style="margin-bottom:16px">
+          <h2 style="font-size:15px;margin-bottom:8px">📅 My plans this week</h2>
+          ${myWkPlans.length ? myWkPlans.map((p) => `<div data-goplan style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)">
+            <b>${fmtD(p.plan_date).slice(5)}</b>${p.plan_time ? " " + p.plan_time.slice(0, 5) : ""} · ${esc(p.title)} ${partBadge(p.part)}</div>`).join("")
+          : `<div style="font-size:12.5px;color:var(--ink-2)">No confirmed plans this week.</div>`}
+        </div>
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <h2 style="font-size:15px">🏆 Scores ${yr}</h2>
+            ${isManager() ? `<button class="btn ghost sm" id="btnScoreTgt">🎯 Score targets</button>` : ""}
+          </div>
+          ${(() => {
+            const myScore = Number(scores.find((x) => x.staff_id === ME.id)?.score || 0);
+            const indivTgt = sTgts.find((t) => !t.part)?.target;
+            const myPct = indivTgt ? Math.min(100, Math.round((myScore / indivTgt) * 100)) : 0;
+            const partRows2 = pScores.map((ps) => {
+              const tgt = sTgts.find((t) => t.part === ps.part)?.target;
+              const pct = tgt ? Math.min(100, Math.round((Number(ps.score) / tgt) * 100)) : null;
+              return `<tr><td>${partBadge(ps.part)}</td><td><b>${Number(ps.score)}</b>${tgt ? ` / ${tgt}` : ""}</td>
+                <td style="width:40%">${tgt ? `<div style="height:5px;background:#e8edf2;border-radius:3px"><div style="height:5px;width:${pct}%;background:${pct >= 100 ? "var(--green)" : pct >= 60 ? "var(--blue)" : "var(--amber)"};border-radius:3px"></div></div>` : `<span style="font-size:11px;color:var(--ink-2)">no target</span>`}</td></tr>`;
+            }).join("");
+            return `
+            <div style="display:flex;align-items:baseline;gap:8px">
+              <span style="font-size:26px;font-weight:800">${myScore}</span>
+              <span style="font-size:12.5px;color:var(--ink-2)">my score${indivTgt ? ` / target ${indivTgt}` : ""}</span>
+            </div>
+            ${indivTgt ? `<div style="height:6px;background:#e8edf2;border-radius:3px;margin:6px 0 10px"><div style="height:6px;width:${myPct}%;background:${myPct >= 100 ? "var(--green)" : myPct >= 60 ? "var(--blue)" : "var(--amber)"};border-radius:3px"></div></div>` : `<div style="margin-bottom:8px"></div>`}
+            <table><tbody>${partRows2 || `<tr><td class="empty">No data</td></tr>`}</tbody></table>
+            <div style="font-size:10.5px;color:var(--ink-2);margin-top:6px">Planned: meeting 2 · VC 1 · trip 3 · other 1 — unplanned ×2. Counted when your report is approved.</div>`;
+          })()}
+        </div>
+        <div class="card" style="margin-bottom:16px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
             <h2 style="font-size:15px">Part summary</h2>
             ${isManager() ? `<button class="btn ghost sm" id="btnTargets">🎯 Set targets</button>` : ""}
@@ -558,7 +758,9 @@ async function renderDashboard() {
     </div>` : ""}`;
 
   document.querySelectorAll("[data-rev]").forEach((el) => (el.onclick = () => openReport(Number(el.dataset.rev))));
+  document.querySelectorAll("[data-goplan]").forEach((el) => (el.onclick = () => switchView("plan")));
   if ($("#btnTargets")) $("#btnTargets").onclick = () => targetsModal();
+  if ($("#btnScoreTgt")) $("#btnScoreTgt").onclick = () => scoreTargetsModal();
 
   if (showIndiv) {
     charts.push(new Chart($("#chStaff"), {
@@ -575,6 +777,44 @@ async function renderDashboard() {
     data: { labels: types.map((tp) => TYPE_LABEL[tp]), datasets: [{ data: types.map((tp) => cTot[tp]), backgroundColor: types.map((tp) => TYPE_COLOR[tp]) }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { boxWidth: 12, font: { size: 11 } } } } },
   }));
+}
+
+async function scoreTargetsModal() {
+  const yr = new Date().getFullYear();
+  const parts = PARTS.length ? PARTS.map((p) => p.name) : [...new Set(STAFF.map((x) => x.part))];
+  const canIndiv = isExec() || ME.is_admin;
+  const myParts = ME.role === "leader" && !canIndiv ? [ME.part] : parts;
+  const { data: rows } = await sb.from("score_targets").select("*").eq("year", yr);
+  const cur = rows || [];
+  openModal(`
+    <h3>🎯 Score targets — ${yr}</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Individual target applies equally to every employee. Part targets are team totals for the year.</p>
+    <div class="field"><label>Individual target (everyone)</label>
+      <input type="number" min="0" id="stIndiv" placeholder="e.g. 100" value="${cur.find((t) => !t.part)?.target ?? ""}" ${canIndiv ? "" : "disabled"} />
+      ${canIndiv ? "" : `<div style="font-size:11px;color:var(--ink-2);margin-top:2px">Set by Team Lead / Director.</div>`}</div>
+    ${myParts.map((p) => `<div class="field"><label>${esc(p)} team target</label>
+      <input type="number" min="0" data-stpart="${esc(p)}" placeholder="e.g. 500" value="${cur.find((t) => t.part === p)?.target ?? ""}" /></div>`).join("")}
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="stSave">Save</button>
+    </div>`);
+  $("#stSave").onclick = async () => {
+    const jobs = [];
+    if (canIndiv) {
+      const v = $("#stIndiv").value;
+      if (v === "" || Number(v) === 0) jobs.push(sb.from("score_targets").delete().eq("year", yr).is("part", null));
+      else jobs.push(sb.from("score_targets").upsert({ year: yr, part: null, target: Number(v) }, { onConflict: "year,part" }));
+    }
+    document.querySelectorAll("[data-stpart]").forEach((inp) => {
+      const p = inp.dataset.stpart, v = inp.value;
+      if (v === "" || Number(v) === 0) jobs.push(sb.from("score_targets").delete().eq("year", yr).eq("part", p));
+      else jobs.push(sb.from("score_targets").upsert({ year: yr, part: p, target: Number(v) }, { onConflict: "year,part" }));
+    });
+    const res = await Promise.all(jobs);
+    const bad = res.find((x) => x.error);
+    if (bad) return alert("Save failed: " + bad.error.message);
+    closeModal(); renderDashboard();
+  };
 }
 
 async function targetsModal() {
@@ -672,7 +912,7 @@ async function renderActivities() {
       : fmtD(a.activity_date);
     return `<tr style="${a.status === "canceled" ? "opacity:.55" : ""}">
       <td style="white-space:nowrap">${dateTxt}</td>
-      <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span></td>
+      <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span>${a.planned === false ? `<div style="margin-top:2px"><span class="badge pending" title="Unplanned — double score">⚡ ×2</span></div>` : ""}</td>
       <td style="vertical-align:top">
         ${(a.activity_companies || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:3px">${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}</div>` : `<span style="color:var(--ink-2)">-</span>`}
       </td>
@@ -686,7 +926,7 @@ async function renderActivities() {
       <td><button class="btn ghost sm" data-repstat="${a.id}" style="white-space:nowrap">📝 ${done + subm}/${partIds.length}</button></td>
       <td><span class="badge ${a.status === "approved" ? "approved" : a.status === "canceled" ? "returned" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
       <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:4px;max-width:150px;justify-content:flex-end">
-        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button>` : ""}
+        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button><button class="btn ghost sm" data-flip="${a.id}" title="Toggle planned/unplanned before approving">${a.planned === false ? "→📅 1x" : "→⚡ ×2"}</button>` : ""}
         ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button>` : ""}
         ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
         ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
@@ -698,6 +938,12 @@ async function renderActivities() {
     ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Customer PIC</th><th>Topic</th><th>Host</th><th>Participants</th><th>Reports</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">No activities match. Log your first one!</div>`;
 
+  document.querySelectorAll("[data-flip]").forEach((b) => (b.onclick = async () => {
+    const a = window.__acts.find((x) => x.id == b.dataset.flip);
+    const { error } = await sb.from("activities").update({ planned: a.planned === false }).eq("id", a.id);
+    if (error) return alert("Toggle failed: " + error.message);
+    renderActivities();
+  }));
   document.querySelectorAll("[data-appract]").forEach((b) => (b.onclick = async () => {
     const { error } = await sb.from("activities").update({ status: "approved" }).eq("id", b.dataset.appract);
     if (error) return alert("Approve failed: " + error.message);
@@ -793,6 +1039,13 @@ function activityModal(edit = null) {
     <div class="field" id="aEndWrap" style="display:${edit?.type === "trip" ? "block" : "none"}">
       <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
+    <div class="field"><label>Was this planned?</label>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn ${edit?.planned === false ? "ghost" : "navy"} sm" id="aPlanY" style="flex:1">📅 Planned (1x)</button>
+        <button type="button" class="btn ${edit?.planned === false ? "navy" : "ghost"} sm" id="aPlanN" style="flex:1">⚡ Unplanned (×2)</button>
+      </div>
+      <div style="font-size:11px;color:var(--ink-2);margin-top:4px">Unplanned = extra activity outside the plan calendar — double score. Your part leader confirms this when approving.</div>
+    </div>
     ${tagPanelHTML()}
     <div class="field"><label>Customer PIC (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
@@ -814,6 +1067,13 @@ function activityModal(edit = null) {
   };
   drawChips();
   bindTagPanel(pickedCos, pickedCts);
+  let aPlanned = edit ? edit.planned !== false : true;
+  const paintPlan = () => {
+    $("#aPlanY").className = "btn " + (aPlanned ? "navy" : "ghost") + " sm";
+    $("#aPlanN").className = "btn " + (aPlanned ? "ghost" : "navy") + " sm";
+  };
+  $("#aPlanY").onclick = () => { aPlanned = true; paintPlan(); };
+  $("#aPlanN").onclick = () => { aPlanned = false; paintPlan(); };
   $("#aPickP").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
   $("#aType").onchange = () => { $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none"; };
 
@@ -822,6 +1082,7 @@ function activityModal(edit = null) {
     const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
       end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
       customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
+      planned: aPlanned,
       notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id,
       status: "pending" };
     if (!rec.title || !rec.activity_date) return alert("Topic and date are required.");
@@ -1173,9 +1434,11 @@ async function renderAdmin() {
   const main = $("#main");
   const [{ data: staff }, { data: settingRows }] = await Promise.all([
     sb.from("staff").select("*").order("part").order("name"),
-    sb.from("app_settings").select("*").eq("key", "show_individual_stats"),
+    sb.from("app_settings").select("*"),
   ]);
-  const showIndiv = settingRows?.[0]?.value === "true";
+  const settings = settingRows || [];
+  const getSet = (k, dflt) => settings.find((x) => x.key === k)?.value ?? dflt;
+  const showIndiv = getSet("show_individual_stats", "false") === "true";
   const pending = (staff || []).filter((s) => s.status === "pending");
   const rest = (staff || []).filter((s) => s.status !== "pending");
 
@@ -1190,6 +1453,16 @@ async function renderAdmin() {
           : "only <b>part leaders & the director</b> can see per-employee stats. Members see company & part totals."}</div>
       </div>
       <button class="btn ${showIndiv ? "danger" : "navy"}" id="btnToggleIndiv">${showIndiv ? "Hide from members" : "Show to everyone"}</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <b style="font-size:14px">🏆 Score settings</b>
+      <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">Points per planned activity — unplanned activities get the multiplier. Changing values re-scores everything instantly.</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        ${[["score_meeting","Meeting","2"],["score_vc","VC","1"],["score_trip","Trip","3"],["score_other","Other","1"],["score_unplanned_mult","Unplanned ×","2"]].map(([k, lbl, d]) => `
+          <div class="field" style="margin:0"><label>${lbl}</label><input type="number" min="0" step="0.5" style="width:90px" data-scoreset="${k}" value="${esc(getSet(k, d))}" /></div>`).join("")}
+        <button class="btn sm" id="btnSaveScores">Save</button>
+      </div>
     </div>
 
     ${pending.length ? `
@@ -1232,6 +1505,14 @@ async function renderAdmin() {
       </tbody></table></div>`;
 
   $("#btnAddStaff").onclick = () => staffModal();
+  $("#btnSaveScores").onclick = async () => {
+    const jobs = [...document.querySelectorAll("[data-scoreset]")].map((inp) =>
+      sb.from("app_settings").upsert({ key: inp.dataset.scoreset, value: String(Number(inp.value) || 0) }, { onConflict: "key" }));
+    const res = await Promise.all(jobs);
+    const bad = res.find((x) => x.error);
+    if (bad) return alert("Save failed: " + bad.error.message);
+    alert("Score settings saved.");
+  };
   $("#btnAddPart").onclick = () => partModal();
   document.querySelectorAll("[data-editpart]").forEach((b) => (b.onclick = () => partModal(PARTS.find((p) => p.id == b.dataset.editpart))));
   document.querySelectorAll("[data-delpart]").forEach((b) => (b.onclick = async () => {
