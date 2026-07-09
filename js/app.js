@@ -668,7 +668,7 @@ async function renderActivities() {
     const subm = reps.filter((x) => x.status === "submitted").length;
     const days = a.type === "trip" ? Math.round((new Date(a.end_date || a.activity_date) - new Date(a.activity_date)) / 86400000) + 1 : 1;
     const dateTxt = a.type === "trip" && a.end_date && a.end_date !== a.activity_date
-      ? `${fmtD(a.activity_date)} ~ ${fmtD(a.end_date)} <span style="font-size:11px;color:var(--ink-2)">(${days}d)</span>`
+      ? `${fmtD(a.activity_date)}<div style="font-size:11.5px;color:var(--ink-2);white-space:nowrap">~ ${fmtD(a.end_date)} <b>(${days}d)</b></div>`
       : fmtD(a.activity_date);
     return `<tr style="${a.status === "canceled" ? "opacity:.55" : ""}">
       <td style="white-space:nowrap">${dateTxt}</td>
@@ -680,18 +680,18 @@ async function renderActivities() {
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
         ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}
-        ${a.status === "canceled" && a.cancel_reason ? `<div style="font-size:12px;color:var(--red)">✖ ${esc(a.cancel_reason)}</div>` : ""}</td>
+        ${a.status === "canceled" && a.cancel_reason ? `<div style="font-size:12px;color:var(--red);cursor:pointer" data-cxview="${a.id}" title="Click to read the full cancel remark">✖ ${esc(a.cancel_reason.length > 28 ? a.cancel_reason.slice(0, 28) + "…" : a.cancel_reason)} ${a.cancel_reason.length > 28 ? "<u>more</u>" : ""}</div>` : ""}</td>
       <td>${esc(staffName(a.created_by))}</td>
       <td style="font-size:12.5px">${partNames.map(esc).join(", ") || "-"}</td>
       <td><button class="btn ghost sm" data-repstat="${a.id}" style="white-space:nowrap">📝 ${done + subm}/${partIds.length}</button></td>
       <td><span class="badge ${a.status === "approved" ? "approved" : a.status === "canceled" ? "returned" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
-      <td style="white-space:nowrap">
-        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button> ` : ""}
-        ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button> ` : ""}
-        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button> ` : ""}
-        ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button> ` : ""}
+      <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:4px;max-width:150px;justify-content:flex-end">
+        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button>` : ""}
+        ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button>` : ""}
+        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
+        ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
         ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
-      </td>
+      </div></td>
     </tr>`;
   }).join("");
   $("#actList").innerHTML = rows
@@ -714,6 +714,21 @@ async function renderActivities() {
     renderActivities();
   }));
   document.querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = () => cancelActivityModal(Number(b.dataset.cancel))));
+  document.querySelectorAll("[data-cxview]").forEach((el) => (el.onclick = () => {
+    const a = window.__acts.find((x) => x.id == el.dataset.cxview);
+    openModal(`
+      <h3>✖ Canceled — ${esc(a.title)}</h3>
+      <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">${fmtD(a.activity_date)} · ${esc(staffName(a.created_by))}</div>
+      <div class="field"><label>Cancel remark</label>
+        <div style="white-space:pre-wrap;background:#fff5f5;border:1.5px solid #f3c9c9;border-radius:8px;padding:12px;font-size:13.5px;line-height:1.6">${esc(a.cancel_reason || "")}</div></div>
+      <div class="modal-actions">
+        ${a.created_by === ME.id ? `<button class="btn ghost" id="cxResched">Reschedule this</button>` : ""}
+        <button class="btn" onclick="closeModal()">Close</button></div>`);
+    if ($("#cxResched")) $("#cxResched").onclick = () => {
+      closeModal();
+      activityModal({ ...a, id: null, status: "pending", cancel_reason: null, _copyOf: a.id });
+    };
+  }));
   document.querySelectorAll("[data-repstat]").forEach((b) => (b.onclick = () => reportStatusModal(Number(b.dataset.repstat))));
   document.querySelectorAll("[data-myrep]").forEach((b) => (b.onclick = () => openMyReportFor(Number(b.dataset.myrep))));
 }
