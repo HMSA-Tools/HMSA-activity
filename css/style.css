@@ -248,3 +248,14 @@ tr.clickable:hover { background: #f7fafc; cursor: pointer; }
   display: flex; align-items: center; justify-content: center;
 }
 .logo-chip img { height: 22px; width: auto; max-width: 100%; }
+
+/* ===== Plan Calendar (v7) ===== */
+.plan-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.plan-dow { font-size: 11px; font-weight: 700; color: var(--ink-2); text-align: center; padding: 4px 0; }
+.plan-cell { min-height: 96px; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; font-size: 12px; cursor: pointer; transition: border-color .15s; }
+.plan-cell:hover { border-color: var(--green); }
+.plan-cell.dim { background: #f6f8fa; cursor: default; }
+.plan-cell.today { border: 2px solid var(--green); }
+.plan-day { font-size: 11.5px; font-weight: 700; color: var(--ink-2); margin-bottom: 3px; }
+.plan-chip { display: block; margin: 2px 0; padding: 2px 6px; border-radius: 5px; background: #f0f4f8; font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 3px solid var(--navy); }
+.plan-chip.pending { border-style: dashed; border-width: 1.5px 1.5px 1.5px 3px; background: #fffdf3; }
