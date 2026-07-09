@@ -431,7 +431,7 @@ function bindPeriodBar(rerender) {
 async function renderDashboard() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Dashboard</div>
-    <div class="page-sub">Approved activities only · ${esc(CONFIG.COMPANY_NAME)}</div>
+    <div class="page-sub">Company/part totals: approved activities · Individual counts: activities where your own report is approved · ${esc(CONFIG.COMPANY_NAME)}</div>
     ${periodBarHTML()}<div id="dashBody" class="empty">Loading...</div>`;
   bindPeriodBar(renderDashboard);
 
@@ -688,7 +688,8 @@ async function renderActivities() {
       <td style="white-space:nowrap">
         ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button> ` : ""}
         ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button> ` : ""}
-        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button> <button class="btn ghost sm" data-del="${a.id}">Delete</button>` : ""}
+        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button> <button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button> ` : ""}
+        ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button> ` : ""}
         ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
       </td>
     </tr>`;
