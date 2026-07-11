@@ -231,6 +231,7 @@ async function renderPlan() {
     .order("plan_date").order("plan_time");
   const plans = plansRaw || [];
   window.__plans = plans;
+  if (!$("#plGrid")) return; // view switched while loading
 
   // leader/exec: pending confirmation strip
   if (isManager()) {
@@ -611,6 +612,7 @@ async function renderDashboard() {
     sb.from("score_targets").select("*").eq("year", yr),
     sb.from("plans").select("*, plan_participants(staff_id)").eq("status", "confirmed").gte("plan_date", wkStart).lte("plan_date", wkEnd).order("plan_date").order("plan_time"),
   ]);
+  if (!$("#dashBody")) return; // view switched while loading
   if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
   const comp = compQ.data || [], partRows = partQ.data || [], indiv = indivQ.data || [];
   const targets = targetQ.data || [], halfPart = halfPartQ.data || [];
@@ -677,6 +679,7 @@ async function renderDashboard() {
     </div>${cnt.returned ? `<div style="font-size:12px;color:var(--red);margin-top:8px">↩️ You have ${cnt.returned} returned report(s) to fix.</div>` : ""}`;
   }
 
+  if (!$("#dashBody")) return; // view switched while loading
   $("#dashBody").innerHTML = `
     <div class="grid kpi">
       <div class="card kpi-card"><div class="kpi-label">Total activities (company)</div><div class="kpi-num">${grand}</div><div class="kpi-sub">items</div></div>
@@ -934,6 +937,7 @@ async function renderActivities() {
       </div></td>
     </tr>`;
   }).join("");
+  if (!$("#actList")) return; // view switched while loading
   $("#actList").innerHTML = rows
     ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Customer PIC</th><th>Topic</th><th>Host</th><th>Participants</th><th>Reports</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">No activities match. Log your first one!</div>`;
@@ -1165,7 +1169,9 @@ async function drawReportList(sel, onlySubmitted = false) {
       <td>v${r.version}</td>
       <td><span class="badge ${r.status}">${ST_LABEL[r.status]}</span></td>
     </tr>`).join("");
-  $(sel).innerHTML = rows
+  const listEl = $(sel);
+  if (!listEl) return; // view switched while loading
+  listEl.innerHTML = rows
     ? `<table><thead><tr><th>Date</th><th>Type / Tags</th><th>Counterpart</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">${onlySubmitted ? "No reports awaiting review." : "No reports match. Write your first one!"}</div>`;
   document.querySelectorAll("[data-open]").forEach((tr) => (tr.onclick = () => openReport(Number(tr.dataset.open))));
