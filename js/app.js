@@ -48,6 +48,27 @@ function matchesSearch(q, ...fields) {
 }
 const isManager = () => ME && (ME.role === "leader" || ME.role === "teamlead" || ME.role === "director" || ME.is_admin);
 const halfKey = (d = new Date()) => `${d.getFullYear()}-H${d.getMonth() < 6 ? 1 : 2}`;
+const fmtT = (t) => { if (!t) return ""; const [H, M] = t.split(":"); const h = Number(H); return `${String(h % 12 === 0 ? 12 : h % 12).padStart(2, "0")}:${M} ${h < 12 ? "AM" : "PM"}`; };
+const fmt12 = (t) => { if (!t) return ""; const [H, M] = t.split(":").map(Number); const ap = H >= 12 ? "PM" : "AM"; return `${H % 12 || 12}:${String(M).padStart(2, "0")} ${ap}`; };
+function timePickerHTML(idPrefix, cur) { // cur: "HH:MM" 24h or null
+  let h12 = 9, mm = "00", ap = "AM";
+  if (cur) {
+    const [H, M] = cur.split(":").map(Number);
+    ap = H >= 12 ? "PM" : "AM"; h12 = H % 12 || 12; mm = String(M).padStart(2, "0");
+  }
+  return `<div style="display:flex;gap:6px">
+    <select id="${idPrefix}H" style="flex:1">${[12,1,2,3,4,5,6,7,8,9,10,11].map((h) => `<option ${h === h12 ? "selected" : ""}>${h}</option>`).join("")}</select>
+    <select id="${idPrefix}M" style="flex:1">${["00","15","30","45"].map((m) => `<option ${m === mm ? "selected" : ""}>${m}</option>`).join("")}</select>
+    <select id="${idPrefix}AP" style="flex:1">${["AM","PM"].map((a) => `<option ${a === ap ? "selected" : ""}>${a}</option>`).join("")}</select>
+  </div>`;
+}
+function timePickerValue(idPrefix) { // -> "HH:MM" 24h or null
+  const hEl = $("#" + idPrefix + "H");
+  if (!hEl) return null;
+  let h = Number(hEl.value) % 12;
+  if ($("#" + idPrefix + "AP").value === "PM") h += 12;
+  return `${String(h).padStart(2, "0")}:${$("#" + idPrefix + "M").value}`;
+}
 const halfRange = (key) => { const [y, h] = key.split("-H"); return h === "1" ? { from: `${y}-01-01`, to: `${y}-06-30` } : { from: `${y}-07-01`, to: `${y}-12-31` }; };
 const isExec = () => ME && (ME.role === "teamlead" || ME.role === "director");
 const canReviewActivity = (a) => (ME.role === "leader" && a.part === ME.part) || isExec() || ME.is_admin;
@@ -205,7 +226,7 @@ async function renderPlan() {
   const to = `${y}-${String(m + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
 
   main.innerHTML = `<div class="page-title">Plan Calendar</div>
-    <div class="page-sub">Part leaders confirm plans. Members submit plans for leader confirmation. Activities matching a plan score 1x — unplanned extra activities score ×2.</div>
+    <div class="page-sub">All activities start here. Leaders add scheduled plans (1x) or self-made ones (×2). Members submit plans — accepted member plans count ×2. Confirming a plan creates the activity automatically.</div>
     <div class="filterbar" style="align-items:center">
       <button class="btn ghost sm" id="plPrev">◀</button>
       <b style="font-size:15px;min-width:120px;text-align:center">${y}. ${String(m + 1).padStart(2, "0")}</b>
@@ -226,7 +247,7 @@ async function renderPlan() {
   $("#plNew").onclick = () => planModal();
 
   const { data: plansRaw } = await sb.from("plans")
-    .select("*, plan_participants(staff_id)")
+    .select("*, plan_participants(staff_id), plan_companies(company_id), plan_contracts(contract_id)")
     .gte("plan_date", from).lte("plan_date", to)
     .order("plan_date").order("plan_time");
   const plans = plansRaw || [];
@@ -240,7 +261,7 @@ async function renderPlan() {
       $("#plPendingWrap").innerHTML = `<div class="card" style="margin-bottom:12px;border-left:4px solid var(--amber)">
         <b style="font-size:13.5px">⏳ ${pend.length} plan(s) awaiting your confirmation</b>
         ${pend.map((p) => `<div data-plopen="${p.id}" style="cursor:pointer;font-size:12.5px;padding:4px 0;border-bottom:1px dashed var(--line)">
-          ${fmtD(p.plan_date)}${p.plan_time ? " " + p.plan_time.slice(0, 5) : ""} · <b>${esc(p.title)}</b> ${partBadge(p.part)} <span style="color:var(--ink-2)">${esc(staffName(p.created_by))}</span></div>`).join("")}
+          ${fmtD(p.plan_date)}${p.plan_time ? " " + fmtT(p.plan_time) : ""} · <b>${esc(p.title)}</b> ${partBadge(p.part)} <span style="color:var(--ink-2)">${esc(staffName(p.created_by))}</span></div>`).join("")}
       </div>`;
     }
   }
@@ -254,7 +275,7 @@ async function renderPlan() {
     const dayPlans = plans.filter((p) => p.plan_date === ds);
     cells += `<div class="plan-cell ${ds === todayStr ? "today" : ""}" data-plday="${ds}">
       <div class="plan-day">${d}</div>
-      ${dayPlans.map((p) => `<span class="plan-chip ${p.status}" data-plopen="${p.id}" style="border-left-color:${partColor(p.part)}" title="${esc(p.title)}">${p.status === "pending" ? "⏳ " : ""}${p.plan_time ? p.plan_time.slice(0, 5) + " " : ""}${esc(p.title)}</span>`).join("")}
+      ${dayPlans.map((p) => `<span class="plan-chip ${p.status}" data-plopen="${p.id}" style="border-left-color:${partColor(p.part)}" title="${esc(p.title)}">${p.status === "pending" ? "⏳ " : ""}${p.plan_time ? fmtT(p.plan_time) + " " : ""}${esc(p.title)}</span>`).join("")}
     </div>`;
   }
   $("#plGrid").innerHTML = cells;
@@ -269,80 +290,150 @@ async function renderPlan() {
   }));
 }
 
-function planModal(edit = null, presetDate = null) {
-  const picked = new Set(edit ? (edit.plan_participants || []).map((p) => p.staff_id) : [ME.id]);
+function planModal(edit = null, presetDate = null, fromActivity = null) {
+  const picked = new Set(edit ? (edit.plan_participants || []).map((p) => p.staff_id)
+    : fromActivity ? (fromActivity.activity_participants || []).map((p) => p.staff_id) : [ME.id]);
+  const pickedCos = new Set(edit ? (edit.plan_companies || []).map((c) => c.company_id)
+    : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(edit ? (edit.plan_contracts || []).map((c) => c.contract_id)
+    : fromActivity ? (fromActivity.activity_contracts || []).map((c) => c.contract_id) : []);
   const active = STAFF.filter((x) => x.status === "active");
   const autoConfirm = isManager();
+  let mult = edit ? edit.multiplier : autoConfirm ? 1 : 2;
+  const aType = edit?.a_type || fromActivity?.type || "meeting";
   openModal(`
-    <h3>${edit ? "Edit plan" : "New plan"}</h3>
-    ${autoConfirm ? "" : `<p style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">Your plan will be sent to your part leader for confirmation.</p>`}
+    <h3>${edit ? "Edit plan" : fromActivity ? "Reschedule as new plan" : "New plan"}</h3>
+    ${autoConfirm ? "" : `<p style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">Your plan goes to your part leader. If accepted, it counts as a self-made activity — <b>double score (×2)</b>.</p>`}
     <div class="row2">
-      <div class="field"><label>Date</label><input type="date" id="plDate" value="${edit?.plan_date || presetDate || new Date().toISOString().slice(0, 10)}" /></div>
-      <div class="field"><label>Time (optional)</label><input type="time" id="plTime" value="${edit?.plan_time ? edit.plan_time.slice(0, 5) : ""}" /></div>
+      <div class="field"><label>Activity type</label><select id="plType">
+        ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${aType === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label>Date${aType === "trip" ? " (start)" : ""}</label><input type="date" id="plDate" value="${edit?.plan_date || presetDate || fromActivity?.activity_date || new Date().toISOString().slice(0, 10)}" /></div>
     </div>
-    <div class="field"><label>Meeting title / agenda</label><input id="plTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Seaspan 7K LTSA follow-up call" /></div>
+    <div class="field" id="plEndWrap" style="display:${aType === "trip" ? "block" : "none"}">
+      <label>Trip end date</label><input type="date" id="plEnd" value="${edit?.end_date || fromActivity?.end_date || edit?.plan_date || new Date().toISOString().slice(0, 10)}" />
+    </div>
+    <div class="field"><label>Time (optional)</label>${timePickerHTML("plT", edit?.plan_time ? edit.plan_time.slice(0, 5) : null)}
+      <div style="font-size:11px;color:var(--ink-2);margin-top:2px"><label style="display:inline;font-weight:400"><input type="checkbox" id="plNoTime" ${edit && !edit.plan_time ? "checked" : !edit ? "checked" : ""} /> No specific time (all-day)</label></div>
+    </div>
+    ${autoConfirm ? `
+    <div class="field"><label>Score multiplier</label>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn ${mult === 1 ? "navy" : "ghost"} sm" id="plM1" style="flex:1">📅 Scheduled (1x)</button>
+        <button type="button" class="btn ${mult === 2 ? "navy" : "ghost"} sm" id="plM2" style="flex:1">⚡ Self-made (×2)</button>
+      </div>
+      <div style="font-size:11px;color:var(--ink-2);margin-top:4px">Regular/scheduled meetings = 1x. Meetings you created through your own initiative = ×2.</div>
+    </div>` : ""}
+    <div class="field"><label>Title / agenda / goal</label><input id="plTitle" value="${esc(edit?.title || (fromActivity ? fromActivity.title : ""))}" placeholder="e.g. Seaspan 7K LTSA follow-up — align on payment schedule" /></div>
+    ${tagPanelHTML()}
     <div class="field"><label>Participants</label>
       <div class="chips" id="plChips"></div>
       <select id="plPick"><option value="">+ Add participant...</option>
         ${active.map((x) => `<option value="${x.id}">${esc(x.name)} (${esc(x.part)})</option>`).join("")}</select>
     </div>
-    <div class="field"><label>Notes (optional)</label><textarea id="plNotes">${esc(edit?.notes || "")}</textarea></div>
+    <div class="field"><label>Notes (optional)</label><textarea id="plNotes">${esc(edit?.notes || (fromActivity?.cancel_reason ? "Rescheduled. Previous cancel reason: " + fromActivity.cancel_reason : ""))}</textarea></div>
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn" id="plSave">${edit ? "Save" : autoConfirm ? "Create (confirmed)" : "Submit for confirmation"}</button>
+      <button class="btn" id="plSave">${edit ? (edit.status === "rejected" ? "Save & resubmit" : "Save") : autoConfirm ? "Create (confirmed + activity)" : "Submit for confirmation"}</button>
     </div>`);
+  $("#plType").onchange = () => { $("#plEndWrap").style.display = $("#plType").value === "trip" ? "block" : "none"; };
+  if (autoConfirm) {
+    const paint = () => {
+      $("#plM1").className = "btn " + (mult === 1 ? "navy" : "ghost") + " sm";
+      $("#plM2").className = "btn " + (mult === 2 ? "navy" : "ghost") + " sm";
+    };
+    $("#plM1").onclick = () => { mult = 1; paint(); };
+    $("#plM2").onclick = () => { mult = 2; paint(); };
+  }
   const drawChips = () => {
     $("#plChips").innerHTML = [...picked].map((id) =>
-      `<span class="chip">${esc(staffName(id))}${id !== ME.id || picked.size > 1 ? `<button data-rm="${id}">×</button>` : ""}</span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">No participants</span>`;
+      `<span class="chip">${esc(staffName(id))}${picked.size > 1 || id !== ME.id ? `<button data-rm="${id}">×</button>` : ""}</span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">No participants</span>`;
     document.querySelectorAll("#plChips [data-rm]").forEach((b) => (b.onclick = () => { picked.delete(Number(b.dataset.rm)); drawChips(); }));
   };
   drawChips();
+  bindTagPanel(pickedCos, pickedCts);
   $("#plPick").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
   $("#plSave").onclick = async () => {
+    const isTrip = $("#plType").value === "trip";
     const rec = { title: $("#plTitle").value.trim(), plan_date: $("#plDate").value,
-      plan_time: $("#plTime").value || null, notes: $("#plNotes").value.trim() || null };
+      a_type: $("#plType").value,
+      end_date: isTrip ? ($("#plEnd").value || $("#plDate").value) : null,
+      plan_time: $("#plNoTime").checked ? null : timePickerValue("plT"),
+      multiplier: autoConfirm ? mult : 2,
+      notes: $("#plNotes").value.trim() || null };
     if (!rec.title || !rec.plan_date) return alert("Title and date are required.");
+    if (isTrip && rec.end_date < rec.plan_date) return alert("Trip end date must be on or after the start date.");
     let planId;
     if (edit) {
-      const { error } = await sb.from("plans").update(rec).eq("id", edit.id);
+      const upd = edit.status === "rejected" ? { ...rec, status: "pending", reject_reason: null } : rec;
+      const { error } = await sb.from("plans").update(upd).eq("id", edit.id);
       if (error) return alert("Save failed: " + error.message);
       planId = edit.id;
     } else {
       const { data, error } = await sb.from("plans")
-        .insert({ ...rec, part: ME.part, created_by: ME.id, status: autoConfirm ? "confirmed" : "pending" })
+        .insert({ ...rec, part: ME.part, created_by: ME.id, status: "pending" })
         .select("id").single();
       if (error) return alert("Save failed: " + error.message);
       planId = data.id;
     }
     await sb.from("plan_participants").delete().eq("plan_id", planId);
     if (picked.size) await sb.from("plan_participants").insert([...picked].map((sid) => ({ plan_id: planId, staff_id: sid })));
+    await sb.from("plan_companies").delete().eq("plan_id", planId);
+    await sb.from("plan_contracts").delete().eq("plan_id", planId);
+    if (pickedCos.size) await sb.from("plan_companies").insert([...pickedCos].map((id) => ({ plan_id: planId, company_id: id })));
+    if (pickedCts.size) await sb.from("plan_contracts").insert([...pickedCts].map((id) => ({ plan_id: planId, contract_id: id })));
+    // 리더급 신규 플랜은 즉시 확정 + 활동 자동 생성
+    if (!edit && autoConfirm) {
+      const { error } = await sb.rpc("confirm_plan", { p_plan_id: planId });
+      if (error) return alert("Plan saved but confirm failed: " + error.message);
+    }
     closeModal(); renderPlan();
   };
 }
 
 function planDetailModal(p) {
   if (!p) return;
-  const canConfirm = p.status === "pending" && ((ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin);
-  const canEdit = (p.created_by === ME.id && p.status === "pending") || (ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin;
+  const canDecide = p.status === "pending" && ((ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin);
+  const canEdit = (p.created_by === ME.id && p.status !== "confirmed") || (ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin;
+  const stBadge = p.status === "confirmed" ? `<span class="badge approved">Confirmed</span>`
+    : p.status === "rejected" ? `<span class="badge returned">Rejected</span>`
+    : `<span class="badge pending">Pending confirmation</span>`;
   openModal(`
-    <h3>${p.status === "pending" ? "⏳ " : "📅 "}${esc(p.title)}</h3>
+    <h3>${p.status === "pending" ? "⏳ " : p.status === "rejected" ? "✖ " : "📅 "}${esc(p.title)}</h3>
     <div style="font-size:13px;color:var(--ink-2);margin-bottom:12px">
-      ${fmtD(p.plan_date)}${p.plan_time ? " · " + p.plan_time.slice(0, 5) : ""} · ${partBadge(p.part)} ·
-      <span class="badge ${p.status === "confirmed" ? "approved" : "pending"}">${p.status === "confirmed" ? "Confirmed" : "Pending confirmation"}</span>
+      <span class="badge ${p.a_type}">${TYPE_LABEL[p.a_type] || p.a_type}</span>
+      ${p.multiplier === 2 ? `<span class="badge pending">⚡ ×2</span>` : `<span class="badge part">1x</span>`}
+      ${fmtD(p.plan_date)}${p.a_type === "trip" && p.end_date && p.end_date !== p.plan_date ? " ~ " + fmtD(p.end_date) : ""}${p.plan_time ? " · " + fmt12(p.plan_time) : ""} · ${partBadge(p.part)} · ${stBadge}
     </div>
+    ${p.status === "rejected" && p.reject_reason ? `<div class="field"><label>Reject reason</label>
+      <div style="white-space:pre-wrap;background:#fff5f5;border:1.5px solid #f3c9c9;border-radius:8px;padding:10px;font-size:13px">${esc(p.reject_reason)}</div></div>` : ""}
     <div class="field"><label>Participants</label>
       <div class="chips">${(p.plan_participants || []).map((x) => `<span class="chip">${esc(staffName(x.staff_id))}</span>`).join("") || "-"}</div></div>
+    ${(p.plan_companies || []).length ? `<div class="field"><label>Companies / contracts</label>
+      <div class="chips">${(p.plan_companies || []).map((c) => `<span class="chip">${esc(companyName(c.company_id))}</span>`).join("")}${(p.plan_contracts || []).map((c) => `<span class="chip">${esc(contractName(c.contract_id))}</span>`).join("")}</div></div>` : ""}
     ${p.notes ? `<div class="field"><label>Notes</label><div style="white-space:pre-wrap;font-size:13.5px">${esc(p.notes)}</div></div>` : ""}
-    <div style="font-size:12px;color:var(--ink-2)">Created by ${esc(staffName(p.created_by))}</div>
+    <div style="font-size:12px;color:var(--ink-2)">Created by ${esc(staffName(p.created_by))}${p.status === "confirmed" ? " · ✅ Activity created — see Activities" : ""}</div>
     <div class="modal-actions">
-      ${canEdit ? `<button class="btn ghost" id="plDel" style="color:var(--red)">Delete</button><button class="btn ghost" id="plEdit">Edit</button>` : ""}
-      ${canConfirm ? `<button class="btn" id="plConfirm">✅ Confirm plan</button>` : ""}
-      <button class="btn ${canConfirm ? "ghost" : ""}" onclick="closeModal()">Close</button>
+      ${canEdit && p.status !== "confirmed" ? `<button class="btn ghost" id="plDel" style="color:var(--red)">Delete</button><button class="btn ghost" id="plEdit">Edit</button>` : ""}
+      ${canDecide ? `<button class="btn danger" id="plReject">✖ Reject</button><button class="btn" id="plConfirm">✅ Accept${p.multiplier === 2 ? " (×2)" : " (1x)"}</button>` : ""}
+      <button class="btn ${canDecide ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
   if ($("#plConfirm")) $("#plConfirm").onclick = async () => {
-    const { error } = await sb.from("plans").update({ status: "confirmed" }).eq("id", p.id);
+    const { error } = await sb.rpc("confirm_plan", { p_plan_id: p.id });
     if (error) return alert("Confirm failed: " + error.message);
     closeModal(); renderPlan();
+  };
+  if ($("#plReject")) $("#plReject").onclick = () => {
+    openModal(`
+      <h3>Reject plan</h3>
+      <div class="field"><label>Reject reason</label><textarea id="rjReason" style="min-height:100px" placeholder="e.g. Overlaps with the quarterly review — propose another week."></textarea></div>
+      <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Back</button><button class="btn danger" id="rjGo">Reject</button></div>`);
+    $("#rjGo").onclick = async () => {
+      const reason = $("#rjReason").value.trim();
+      if (!reason) return alert("Enter a reject reason.");
+      const { error } = await sb.from("plans").update({ status: "rejected", reject_reason: reason }).eq("id", p.id);
+      if (error) return alert("Reject failed: " + error.message);
+      closeModal(); renderPlan();
+    };
   };
   if ($("#plEdit")) $("#plEdit").onclick = () => planModal(p);
   if ($("#plDel")) $("#plDel").onclick = async () => {
@@ -702,7 +793,7 @@ async function renderDashboard() {
         <div class="card" style="margin-bottom:16px">
           <h2 style="font-size:15px;margin-bottom:8px">📅 My plans this week</h2>
           ${myWkPlans.length ? myWkPlans.map((p) => `<div data-goplan style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)">
-            <b>${fmtD(p.plan_date).slice(5)}</b>${p.plan_time ? " " + p.plan_time.slice(0, 5) : ""} · ${esc(p.title)} ${partBadge(p.part)}</div>`).join("")
+            <b>${fmtD(p.plan_date).slice(5)}</b>${p.plan_time ? " " + fmtT(p.plan_time) : ""} · ${esc(p.title)} ${partBadge(p.part)}</div>`).join("")
           : `<div style="font-size:12.5px;color:var(--ink-2)">No confirmed plans this week.</div>`}
         </div>
         <div class="card" style="margin-bottom:16px">
@@ -862,19 +953,50 @@ async function targetsModal() {
 /* =========================================================
    ACTIVITIES
    ========================================================= */
+let actFilter = { status: "", type: "", part: "" };
+let repFilter = { status: "", rtype: "", part: "" };
+
+function filterRowHTML(view) {
+  const parts = PARTS.map((p) => p.name);
+  if (view === "act") return `
+    <div class="filterbar">
+      <select id="af_status" style="max-width:150px"><option value="">All status</option>
+        ${Object.entries(ACT_ST).map(([k, v]) => `<option value="${k}" ${actFilter.status === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select id="af_type" style="max-width:150px"><option value="">All types</option>
+        ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${actFilter.type === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select id="af_part" style="max-width:130px"><option value="">All parts</option>
+        ${parts.map((p) => `<option ${actFilter.part === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+    </div>`;
+  return `
+    <div class="filterbar">
+      <select id="rf_status" style="max-width:150px"><option value="">All status</option>
+        ${Object.entries(ST_LABEL).map(([k, v]) => `<option value="${k}" ${repFilter.status === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select id="rf_rtype" style="max-width:160px"><option value="">All types</option>
+        ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${repFilter.rtype === k ? "selected" : ""}>${v}</option>`).join("")}</select>
+      <select id="rf_part" style="max-width:130px"><option value="">All parts</option>
+        ${parts.map((p) => `<option ${repFilter.part === p ? "selected" : ""}>${esc(p)}</option>`).join("")}</select>
+      <select id="rf_tag" style="max-width:140px"><option value="0">All tags</option>
+        ${TAGS.map((t) => `<option value="${t.id}" ${repTagFilter == t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select>
+    </div>`;
+}
+
 async function renderActivities() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Activities</div>
-    <div class="page-sub">Log meetings, VCs and business trips. Each participant writes their own report — click 📝 to see who has.</div>
+    <div class="page-sub">Status board — activities are created from the Plan Calendar. Track reports (📝), edit, cancel. Scores count per person once their own report is approved.</div>
     ${periodBarHTML()}
     ${searchBarHTML("act")}
+    ${filterRowHTML("act")}
     <div class="section-head"><h2>Activity list</h2><div style="display:flex;gap:8px">
       ${isManager() ? `<button class="btn ghost" id="btnCompanies">🏢 Companies</button>` : ""}
-      <button class="btn" id="btnNewAct">+ New activity</button></div></div>
+      <button class="btn" id="btnGoPlan">📅 New? → Plan Calendar</button></div></div>
     <div class="card" style="padding:8px 14px" id="actList"><div class="empty">Loading...</div></div>`;
   bindPeriodBar(renderActivities);
   bindSearchBar("act", renderActivities);
-  $("#btnNewAct").onclick = () => activityModal();
+  $("#af_status").onchange = (e) => { actFilter.status = e.target.value; renderActivities(); };
+  $("#af_type").onchange = (e) => { actFilter.type = e.target.value; renderActivities(); };
+  $("#af_part").onchange = (e) => { actFilter.part = e.target.value; renderActivities(); };
+  $("#btnGoPlan").onclick = () => switchView("plan");
   if ($("#btnCompanies")) $("#btnCompanies").onclick = companiesModal;
 
   const r = getRange();
@@ -884,7 +1006,6 @@ async function renderActivities() {
     .order("activity_date", { ascending: false });
   let acts = actsRaw || [];
 
-  // linked reports for status board
   const ids = acts.map((a) => a.id);
   let linked = [];
   if (ids.length) {
@@ -893,13 +1014,16 @@ async function renderActivities() {
   }
   window.__actLinked = linked; window.__acts = acts;
 
-  // filters
   acts = acts.filter((a) => {
+    if (actFilter.status && a.status !== actFilter.status) return false;
+    if (actFilter.type && a.type !== actFilter.type) return false;
+    if (actFilter.part && a.part !== actFilter.part) return false;
     if (coFilter.act && !(a.activity_companies || []).some((c) => c.company_id === coFilter.act)) return false;
     const coNames = (a.activity_companies || []).map((c) => companyName(c.company_id)).join(" ");
     return matchesSearch(searchQ.act, a.title, a.customer, a.notes, staffName(a.created_by), coNames);
   });
 
+  if (!$("#actList")) return;
   const rows = acts.map((a) => {
     const partIds = (a.activity_participants || []).map((p) => p.staff_id);
     const partNames = (a.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => staffName(p.staff_id));
@@ -915,7 +1039,7 @@ async function renderActivities() {
       : fmtD(a.activity_date);
     return `<tr style="${a.status === "canceled" ? "opacity:.55" : ""}">
       <td style="white-space:nowrap">${dateTxt}</td>
-      <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span>${a.planned === false ? `<div style="margin-top:2px"><span class="badge pending" title="Unplanned — double score">⚡ ×2</span></div>` : ""}</td>
+      <td><span class="badge ${a.type}">${TYPE_LABEL[a.type]}</span>${a.planned === false ? `<div style="margin-top:2px"><span class="badge pending" title="Self-made activity — double score">⚡ ×2</span></div>` : ""}</td>
       <td style="vertical-align:top">
         ${(a.activity_companies || []).length ? `<div style="display:flex;flex-wrap:wrap;gap:3px">${(a.activity_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}</div>` : `<span style="color:var(--ink-2)">-</span>`}
       </td>
@@ -927,36 +1051,24 @@ async function renderActivities() {
       <td>${esc(staffName(a.created_by))}</td>
       <td style="font-size:12.5px">${partNames.map(esc).join(", ") || "-"}</td>
       <td><button class="btn ghost sm" data-repstat="${a.id}" style="white-space:nowrap">📝 ${done + subm}/${partIds.length}</button></td>
-      <td><span class="badge ${a.status === "approved" ? "approved" : a.status === "canceled" ? "returned" : "pending"}">${ACT_ST[a.status] || a.status}</span></td>
+      <td>${partBadge(a.part)}</td>
       <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:4px;max-width:150px;justify-content:flex-end">
-        ${reviewer && a.status === "pending" ? `<button class="btn sm" data-appract="${a.id}">Approve</button><button class="btn ghost sm" data-flip="${a.id}" title="Toggle planned/unplanned before approving">${a.planned === false ? "→📅 1x" : "→⚡ ×2"}</button>` : ""}
         ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button>` : ""}
-        ${mine && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
+        ${(mine || reviewer) && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
         ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
         ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
       </div></td>
     </tr>`;
   }).join("");
-  if (!$("#actList")) return; // view switched while loading
   $("#actList").innerHTML = rows
-    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Customer PIC</th><th>Topic</th><th>Host</th><th>Participants</th><th>Reports</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<div class="empty">No activities match. Log your first one!</div>`;
+    ? `<table><thead><tr><th>Date</th><th>Type</th><th>Company</th><th>Customer PIC</th><th>Topic</th><th>Host</th><th>Participants</th><th>Reports</th><th>Part</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">No activities match. New activities are created by confirming plans in the 📅 Plan Calendar.</div>`;
 
-  document.querySelectorAll("[data-flip]").forEach((b) => (b.onclick = async () => {
-    const a = window.__acts.find((x) => x.id == b.dataset.flip);
-    const { error } = await sb.from("activities").update({ planned: a.planned === false }).eq("id", a.id);
-    if (error) return alert("Toggle failed: " + error.message);
-    renderActivities();
-  }));
-  document.querySelectorAll("[data-appract]").forEach((b) => (b.onclick = async () => {
-    const { error } = await sb.from("activities").update({ status: "approved" }).eq("id", b.dataset.appract);
-    if (error) return alert("Approve failed: " + error.message);
-    renderActivities();
-  }));
   document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => activityModal(window.__acts.find((a) => a.id == b.dataset.edit))));
   document.querySelectorAll("[data-resched]").forEach((b) => (b.onclick = () => {
     const src = window.__acts.find((a) => a.id == b.dataset.resched);
-    activityModal({ ...src, id: null, status: "pending", cancel_reason: null, _copyOf: src.id });
+    switchView("plan");
+    setTimeout(() => planModal(null, null, src), 300); // prefill new plan from canceled activity
   }));
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
     if (!confirm("Delete this activity? (Use Cancel instead if it was called off — that keeps the record.)")) return;
@@ -975,8 +1087,8 @@ async function renderActivities() {
         ${a.created_by === ME.id ? `<button class="btn ghost" id="cxResched">Reschedule this</button>` : ""}
         <button class="btn" onclick="closeModal()">Close</button></div>`);
     if ($("#cxResched")) $("#cxResched").onclick = () => {
-      closeModal();
-      activityModal({ ...a, id: null, status: "pending", cancel_reason: null, _copyOf: a.id });
+      closeModal(); switchView("plan");
+      setTimeout(() => planModal(null, null, a), 300);
     };
   }));
   document.querySelectorAll("[data-repstat]").forEach((b) => (b.onclick = () => reportStatusModal(Number(b.dataset.repstat))));
@@ -1033,8 +1145,7 @@ function activityModal(edit = null) {
   const pickedCts = new Set(edit ? (edit.activity_contracts || []).map((c) => c.contract_id) : []);
   const options = STAFF.filter((s) => s.status === "active" && s.id !== ME.id);
   openModal(`
-    <h3>${edit && edit.id ? "Edit activity" : edit && edit._copyOf ? "Reschedule activity" : "New activity"}</h3>
-    ${edit && edit.id && edit.status === "approved" ? `<p style="font-size:12.5px;color:var(--amber);margin-bottom:10px">⚠️ Editing an approved activity sends it back to Pending for re-approval.</p>` : ""}
+    <h3>Edit activity</h3>
     <div class="row2">
       <div class="field"><label>Type</label><select id="aType">
         ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -1043,13 +1154,7 @@ function activityModal(edit = null) {
     <div class="field" id="aEndWrap" style="display:${edit?.type === "trip" ? "block" : "none"}">
       <label>Trip end date</label><input type="date" id="aEnd" value="${edit?.end_date || edit?.activity_date || new Date().toISOString().slice(0, 10)}" />
     </div>
-    <div class="field"><label>Was this planned?</label>
-      <div style="display:flex;gap:8px">
-        <button type="button" class="btn ${edit?.planned === false ? "ghost" : "navy"} sm" id="aPlanY" style="flex:1">📅 Planned (1x)</button>
-        <button type="button" class="btn ${edit?.planned === false ? "navy" : "ghost"} sm" id="aPlanN" style="flex:1">⚡ Unplanned (×2)</button>
-      </div>
-      <div style="font-size:11px;color:var(--ink-2);margin-top:4px">Unplanned = extra activity outside the plan calendar — double score. Your part leader confirms this when approving.</div>
-    </div>
+
     ${tagPanelHTML()}
     <div class="field"><label>Customer PIC (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
@@ -1071,13 +1176,6 @@ function activityModal(edit = null) {
   };
   drawChips();
   bindTagPanel(pickedCos, pickedCts);
-  let aPlanned = edit ? edit.planned !== false : true;
-  const paintPlan = () => {
-    $("#aPlanY").className = "btn " + (aPlanned ? "navy" : "ghost") + " sm";
-    $("#aPlanN").className = "btn " + (aPlanned ? "ghost" : "navy") + " sm";
-  };
-  $("#aPlanY").onclick = () => { aPlanned = true; paintPlan(); };
-  $("#aPlanN").onclick = () => { aPlanned = false; paintPlan(); };
   $("#aPickP").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
   $("#aType").onchange = () => { $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none"; };
 
@@ -1086,9 +1184,7 @@ function activityModal(edit = null) {
     const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
       end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
       customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
-      planned: aPlanned,
-      notes: $("#aNotes").value.trim() || null, part: ME.part, created_by: ME.id,
-      status: "pending" };
+      notes: $("#aNotes").value.trim() || null };
     if (!rec.title || !rec.activity_date) return alert("Topic and date are required.");
     if (isTrip && rec.end_date < rec.activity_date) return alert("Trip end date must be on or after the start date.");
 
@@ -1123,23 +1219,19 @@ async function renderReports() {
   main.innerHTML = `<div class="page-title">Reports</div>
     <div class="page-sub">Counsel & internal reports. Submitting is one step — write and it goes straight to your part leader. Everyone can read final reports; edit history is visible to reviewers.</div>
     ${searchBarHTML("rep")}
-    <div class="filterbar" id="tagBar" style="display:${isManager() && TAGS.length ? "flex" : "none"}">
-      <span style="font-size:12px;font-weight:700;color:var(--ink-2)">TAG FILTER</span>
-      <div class="seg" id="tagSeg">
-        <button data-tag="0" class="${repTagFilter === 0 ? "active" : ""}">All</button>
-        ${TAGS.map((t) => `<button data-tag="${t.id}" class="${repTagFilter === t.id ? "active" : ""}">${esc(t.name)}</button>`).join("")}
-      </div>
-      ${isManager() ? `<button class="btn ghost sm" id="btnTags" style="margin-left:auto">🏷️ Manage tags</button>` : ""}
-    </div>
+    ${filterRowHTML("rep")}
     <div class="section-head"><h2>Report list</h2><div style="display:flex;gap:8px">
-      ${isManager() ? `<button class="btn ghost" id="btnCompanies2">🏢 Companies</button>` : ""}
+      ${isManager() ? `<button class="btn ghost" id="btnTags">🏷️ Tags</button><button class="btn ghost" id="btnCompanies2">🏢 Companies</button>` : ""}
       <button class="btn" id="btnNewRep">+ New report</button></div></div>
     <div class="card" style="padding:8px 14px" id="repList"><div class="empty">Loading...</div></div>`;
   bindSearchBar("rep", renderReports);
+  $("#rf_status").onchange = (e) => { repFilter.status = e.target.value; renderReports(); };
+  $("#rf_rtype").onchange = (e) => { repFilter.rtype = e.target.value; renderReports(); };
+  $("#rf_part").onchange = (e) => { repFilter.part = e.target.value; renderReports(); };
+  $("#rf_tag").onchange = (e) => { repTagFilter = Number(e.target.value); renderReports(); };
   $("#btnNewRep").onclick = () => reportModal();
   if ($("#btnCompanies2")) $("#btnCompanies2").onclick = companiesModal;
   if ($("#btnTags")) $("#btnTags").onclick = tagsModal;
-  document.querySelectorAll("#tagSeg [data-tag]").forEach((b) => (b.onclick = () => { repTagFilter = Number(b.dataset.tag); renderReports(); }));
   await drawReportList("#repList");
 }
 
@@ -1150,6 +1242,11 @@ async function drawReportList(sel, onlySubmitted = false) {
   const { data } = await q;
   let reps = data || [];
   if (!onlySubmitted && repTagFilter) reps = reps.filter((r) => (r.report_tags || []).some((t) => t.tag_id === repTagFilter));
+  if (!onlySubmitted) {
+    if (repFilter.status) reps = reps.filter((r) => r.status === repFilter.status);
+    if (repFilter.rtype) reps = reps.filter((r) => r.report_type === repFilter.rtype);
+    if (repFilter.part) reps = reps.filter((r) => r.part === repFilter.part);
+  }
   if (coFilter[key]) reps = reps.filter((r) => (r.report_companies || []).some((c) => c.company_id === coFilter[key]));
   if (searchQ[key]) reps = reps.filter((r) => matchesSearch(searchQ[key], r.title, r.customer, r.content, r.followup, staffName(r.author_id),
     (r.report_companies || []).map((c) => companyName(c.company_id)).join(" ")));
