@@ -290,19 +290,23 @@ async function renderPlan() {
   }));
 }
 
-function planModal(edit = null, presetDate = null, fromActivity = null) {
+function planModal(edit = null, presetDate = null, fromActivity = null, linkCtx = null) {
+  const lk = linkCtx?.task || linkCtx?.todo || null;
+  const lkCos = linkCtx?.task ? (linkCtx.task.task_companies || []).map((c) => c.company_id)
+    : linkCtx?.todo ? (linkCtx.todo.todo_companies || []).map((c) => c.company_id) : [];
+  const lkCts = linkCtx?.task ? (linkCtx.task.task_contracts || []).map((c) => c.contract_id) : [];
   const picked = new Set(edit ? (edit.plan_participants || []).map((p) => p.staff_id)
     : fromActivity ? (fromActivity.activity_participants || []).map((p) => p.staff_id) : [ME.id]);
   const pickedCos = new Set(edit ? (edit.plan_companies || []).map((c) => c.company_id)
-    : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : []);
+    : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : lkCos);
   const pickedCts = new Set(edit ? (edit.plan_contracts || []).map((c) => c.contract_id)
-    : fromActivity ? (fromActivity.activity_contracts || []).map((c) => c.contract_id) : []);
+    : fromActivity ? (fromActivity.activity_contracts || []).map((c) => c.contract_id) : lkCts);
   const active = STAFF.filter((x) => x.status === "active");
   const autoConfirm = isManager();
   let mult = edit ? edit.multiplier : autoConfirm ? 1 : 2;
   const aType = edit?.a_type || fromActivity?.type || "meeting";
   openModal(`
-    <h3>${edit ? "Edit plan" : fromActivity ? "Reschedule as new plan" : "New plan"}</h3>
+    <h3>${edit ? "Edit plan" : fromActivity ? "Reschedule as new plan" : lk ? `New plan — linked to: ${esc(lk.title)}` : "New plan"}</h3>
     ${autoConfirm ? "" : `<p style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">Your plan goes to your part leader. If accepted, it counts as a self-made activity — <b>double score (×2)</b>.</p>`}
     <div class="row2">
       <div class="field"><label>Activity type</label><select id="plType">
@@ -323,7 +327,7 @@ function planModal(edit = null, presetDate = null, fromActivity = null) {
       </div>
       <div style="font-size:11px;color:var(--ink-2);margin-top:4px">Regular/scheduled meetings = 1x. Meetings you created through your own initiative = ×2.</div>
     </div>` : ""}
-    <div class="field"><label>Title / agenda / goal</label><input id="plTitle" value="${esc(edit?.title || (fromActivity ? fromActivity.title : ""))}" placeholder="e.g. Seaspan 7K LTSA follow-up — align on payment schedule" /></div>
+    <div class="field"><label>Title / agenda / goal</label><input id="plTitle" value="${esc(edit?.title || (fromActivity ? fromActivity.title : lk ? lk.title : ""))}" placeholder="e.g. Seaspan 7K LTSA follow-up — align on payment schedule" /></div>
     ${tagPanelHTML()}
     <div class="field"><label>Participants</label>
       <div class="chips" id="plChips"></div>
@@ -370,10 +374,16 @@ function planModal(edit = null, presetDate = null, fromActivity = null) {
       planId = edit.id;
     } else {
       const { data, error } = await sb.from("plans")
-        .insert({ ...rec, part: ME.part, created_by: ME.id, status: "pending" })
+        .insert({ ...rec, part: ME.part, created_by: ME.id, status: "pending",
+          task_id: linkCtx?.task?.id || null, todo_id: linkCtx?.todo?.id || null })
         .select("id").single();
       if (error) return alert("Save failed: " + error.message);
       planId = data.id;
+      // 연결된 과제/투두에 자동 코멘트 (제출 시점)
+      if (linkCtx?.task) await sb.from("task_comments").insert({ task_id: linkCtx.task.id, author_id: ME.id,
+        body: `📅 Plan submitted: "${rec.title}" on ${rec.plan_date}${rec.plan_time ? " " + fmt12(rec.plan_time) : ""}` });
+      if (linkCtx?.todo) await sb.from("todo_comments").insert({ todo_id: linkCtx.todo.id, author_id: ME.id,
+        body: `📅 Plan submitted: "${rec.title}" on ${rec.plan_date}${rec.plan_time ? " " + fmt12(rec.plan_time) : ""}` });
     }
     await sb.from("plan_participants").delete().eq("plan_id", planId);
     if (picked.size) await sb.from("plan_participants").insert([...picked].map((sid) => ({ plan_id: planId, staff_id: sid })));
@@ -432,6 +442,8 @@ function planDetailModal(p) {
       if (!reason) return alert("Enter a reject reason.");
       const { error } = await sb.from("plans").update({ status: "rejected", reject_reason: reason }).eq("id", p.id);
       if (error) return alert("Reject failed: " + error.message);
+      if (p.task_id) await sb.from("task_comments").insert({ task_id: p.task_id, author_id: ME.id, body: `✖ Plan rejected: ${reason}` });
+      if (p.todo_id) await sb.from("todo_comments").insert({ todo_id: p.todo_id, author_id: ME.id, body: `✖ Plan rejected: ${reason}` });
       closeModal(); renderPlan();
     };
   };
@@ -440,6 +452,319 @@ function planDetailModal(p) {
     if (!confirm("Delete this plan?")) return;
     await sb.from("plans").delete().eq("id", p.id);
     closeModal(); renderPlan();
+  };
+}
+
+/* =========================================================
+   WORKBOARD (v9): part task boards + personal to-dos
+   ========================================================= */
+var boardPart = null;
+const CO_TINTS = ["#fff3b0", "#ffd6d6", "#d6e8ff", "#d9f7d9", "#f3e0ff", "#ffe4c4", "#d9f2f2", "#ffe0ef"];
+const companyTint = (id) => CO_TINTS[Number(id) % CO_TINTS.length];
+const TASK_ST = { open: "Open / Discussing", progress: "In Progress", done: "Done", canceled: "Canceled" };
+const TASK_ST_COLOR = { open: "#e7edf3", progress: "#dbe9ff", done: "#d9f7d9", canceled: "#e9ecef" };
+const IMP_LABEL = { high: "HIGH", mid: "MID", low: "LOW" };
+const agoTxt = (ts) => { const d = Math.floor((Date.now() - new Date(ts)) / 86400000); return d <= 0 ? "today" : d + "d ago"; };
+
+async function renderBoard() {
+  if (!boardPart) boardPart = ME.part;
+  const main = $("#main");
+  main.innerHTML = `<div class="page-title">Workboard</div>
+    <div class="page-sub">Key projects & follow-ups per part. Card color follows the customer. Click a card for details, comments and actions.</div>
+    <div class="filterbar" style="align-items:center">
+      <div class="seg">${PARTS.map((p) => `<button data-bpart="${esc(p.name)}" class="${boardPart === p.name ? "active" : ""}">${esc(p.name)}</button>`).join("")}</div>
+      <button class="btn" id="btnNewTask" style="margin-left:auto">+ New task</button>
+    </div>
+    <div id="boardBody" class="empty">Loading...</div>
+    <div class="section-head" style="margin-top:22px"><h2>✅ ${esc(boardPart)} — personal to-dos</h2>
+      ${boardPart === ME.part ? `<button class="btn ghost" id="btnNewTodo">+ My to-do</button>` : ""}</div>
+    <div id="todoBody" class="empty">Loading...</div>`;
+  document.querySelectorAll("[data-bpart]").forEach((b) => (b.onclick = () => { boardPart = b.dataset.bpart; renderBoard(); }));
+  $("#btnNewTask").onclick = () => taskModal();
+  if ($("#btnNewTodo")) $("#btnNewTodo").onclick = () => todoModal();
+
+  const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }] = await Promise.all([
+    sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart).order("last_fup", { ascending: false }),
+    sb.from("task_comments").select("id,task_id,needs_ack,acked_by"),
+    sb.from("todos").select("*, todo_companies(company_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
+  ]);
+  const tasks = tRaw || [], cmts = cRaw || [], todos = tdRaw || [], tdCmts = tdcRaw || [];
+  window.__tasks = tasks; window.__todos = todos;
+  if (!$("#boardBody")) return;
+
+  const cardHTML = (t) => {
+    const co = (t.task_companies || [])[0];
+    const tint = t.status === "canceled" ? "#e9ecef" : co ? companyTint(co.company_id) : "#ffffff";
+    const wm = co ? companyName(co.company_id) : "";
+    const over = t.due_date && t.status !== "done" && t.status !== "canceled" && t.due_date < new Date().toISOString().slice(0, 10);
+    const n = cmts.filter((c) => c.task_id === t.id);
+    const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
+    return `<div class="tcard ${t.status === "canceled" ? "dead" : ""} ${over ? "overdue" : ""}" data-task="${t.id}" style="background:${tint}">
+      ${wm ? `<div class="tcard-wm">${esc(wm)}</div>` : ""}
+      <div class="tcard-top">
+        <span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span>
+        ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}
+      </div>
+      <div class="tcard-title">${esc(t.title)}</div>
+      <div style="margin-bottom:6px">${(t.task_assignees || []).map((a) => `<span class="name-tag">${esc(staffName(a.staff_id))}</span>`).join("") || `<span style="font-size:10.5px;color:var(--ink-2)">unassigned</span>`}</div>
+      <div class="tcard-foot">
+        <span>F/up ${agoTxt(t.last_fup)}</span>
+        <span>${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬 ${n.length}</span>
+      </div>
+    </div>`;
+  };
+
+  $("#boardBody").innerHTML = `<div class="board-cols">
+    ${Object.entries(TASK_ST).map(([st, label]) => {
+      const list = tasks.filter((t) => t.status === st);
+      return `<div>
+        <div class="board-col-head" style="background:${TASK_ST_COLOR[st]}">
+          <span>${st === "canceled" ? "✖ " : st === "done" ? "✔ " : ""}${label}</span><span>${list.length}</span></div>
+        ${list.map(cardHTML).join("") || `<div style="font-size:12px;color:var(--ink-2);text-align:center;padding:14px 0">—</div>`}
+      </div>`;
+    }).join("")}
+  </div>`;
+  document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
+
+  if (!$("#todoBody")) return;
+  const todoCard = (td) => {
+    const co = (td.todo_companies || [])[0];
+    const tint = td.done ? "#eef4ee" : co ? companyTint(co.company_id) : "#fffdf3";
+    const n = tdCmts.filter((c) => c.todo_id === td.id);
+    const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
+    const over = td.due_date && !td.done && td.due_date < new Date().toISOString().slice(0, 10);
+    return `<div class="tcard ${over ? "overdue" : ""}" data-todo="${td.id}" style="background:${tint};${td.done ? "opacity:.6" : ""}">
+      <div class="tcard-top">
+        <span class="name-tag">${esc(staffName(td.staff_id))}${td.staff_id === ME.id ? " (me)" : ""}</span>
+        ${td.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(td.due_date).slice(5)}</span>` : ""}
+      </div>
+      <div class="tcard-title" style="${td.done ? "text-decoration:line-through" : ""}">${td.done ? "✔ " : ""}${esc(td.title)}</div>
+      <div class="tcard-foot">
+        <span>${co ? esc(companyName(co.company_id)) : ""}</span>
+        <span>${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬 ${n.length}</span>
+      </div>
+    </div>`;
+  };
+  $("#todoBody").innerHTML = todos.length
+    ? `<div class="todo-grid">${todos.map(todoCard).join("")}</div>`
+    : `<div class="empty">No to-dos in ${esc(boardPart)} yet.</div>`;
+  document.querySelectorAll("[data-todo]").forEach((el) => (el.onclick = () => todoDetail(Number(el.dataset.todo))));
+}
+
+function taskModal(edit = null) {
+  const myPartStaff = STAFF.filter((x) => x.status === "active");
+  const picked = new Set(edit ? (edit.task_assignees || []).map((a) => a.staff_id) : []);
+  const pickedCos = new Set(edit ? (edit.task_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(edit ? (edit.task_contracts || []).map((c) => c.contract_id) : []);
+  openModal(`
+    <h3>${edit ? "Edit task" : "New task — " + esc(boardPart)}</h3>
+    <div class="field"><label>Title (project / follow-up item)</label><input id="tkTitle" value="${esc(edit?.title || "")}" placeholder="e.g. COSCO Bow Thruster replacement F/up" /></div>
+    <div class="row2">
+      <div class="field"><label>Importance</label><select id="tkImp">
+        ${Object.entries(IMP_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.importance === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label>Due date (optional)</label><input type="date" id="tkDue" value="${edit?.due_date || ""}" /></div>
+    </div>
+    ${edit ? `<div class="field"><label>Status</label><select id="tkSt">
+      ${Object.entries(TASK_ST).map(([k, v]) => `<option value="${k}" ${edit?.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>` : ""}
+    <div class="field"><label>Details</label><textarea id="tkBody" style="min-height:100px">${esc(edit?.body || "")}</textarea></div>
+    ${tagPanelHTML()}
+    <div class="field"><label>Assignees</label>
+      <div class="chips" id="tkChips"></div>
+      <select id="tkPick"><option value="">+ Assign...</option>
+        ${myPartStaff.map((x) => `<option value="${x.id}">${esc(x.name)} (${esc(x.part)})</option>`).join("")}</select>
+    </div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="tkSave">${edit ? "Save" : "Create"}</button></div>`);
+  const drawChips = () => {
+    $("#tkChips").innerHTML = [...picked].map((id) => `<span class="chip">${esc(staffName(id))}<button data-rm="${id}">×</button></span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">Unassigned</span>`;
+    document.querySelectorAll("#tkChips [data-rm]").forEach((b) => (b.onclick = () => { picked.delete(Number(b.dataset.rm)); drawChips(); }));
+  };
+  drawChips();
+  bindTagPanel(pickedCos, pickedCts);
+  $("#tkPick").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
+  $("#tkSave").onclick = async () => {
+    const rec = { title: $("#tkTitle").value.trim(), body: $("#tkBody").value.trim() || null,
+      importance: $("#tkImp").value, due_date: $("#tkDue").value || null };
+    if (edit) rec.status = $("#tkSt").value;
+    if (!rec.title) return alert("Title is required.");
+    let taskId;
+    if (edit) {
+      const { error } = await sb.from("tasks").update(rec).eq("id", edit.id);
+      if (error) return alert("Save failed: " + error.message);
+      taskId = edit.id;
+    } else {
+      const { data, error } = await sb.from("tasks").insert({ ...rec, part: boardPart === ME.part || isExec() || ME.is_admin ? boardPart : ME.part, created_by: ME.id }).select("id").single();
+      if (error) return alert("Save failed: " + error.message);
+      taskId = data.id;
+    }
+    await sb.from("task_assignees").delete().eq("task_id", taskId);
+    if (picked.size) await sb.from("task_assignees").insert([...picked].map((sid) => ({ task_id: taskId, staff_id: sid })));
+    await sb.from("task_companies").delete().eq("task_id", taskId);
+    await sb.from("task_contracts").delete().eq("task_id", taskId);
+    if (pickedCos.size) await sb.from("task_companies").insert([...pickedCos].map((id) => ({ task_id: taskId, company_id: id })));
+    if (pickedCts.size) await sb.from("task_contracts").insert([...pickedCts].map((id) => ({ task_id: taskId, contract_id: id })));
+    closeModal(); renderBoard();
+  };
+}
+
+async function taskDetail(taskId) {
+  const t = (window.__tasks || []).find((x) => x.id === taskId);
+  if (!t) return;
+  const { data: cs } = await sb.from("task_comments").select("*").eq("task_id", taskId).order("created_at");
+  const comments = cs || [];
+  const amInvolved = t.created_by === ME.id || (t.task_assignees || []).some((a) => a.staff_id === ME.id)
+    || (ME.role === "leader" && t.part === ME.part) || isExec() || ME.is_admin;
+  const canDelete = (ME.role === "leader" && t.part === ME.part) || isExec() || ME.is_admin;
+  const over = t.due_date && t.status !== "done" && t.status !== "canceled" && t.due_date < new Date().toISOString().slice(0, 10);
+  openModal(`
+    <h3>${esc(t.title)}</h3>
+    <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span>
+      <span class="badge ${t.status === "done" ? "approved" : t.status === "canceled" ? "returned" : t.status === "progress" ? "submitted" : "pending"}">${TASK_ST[t.status]}</span>
+      ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date)}${over ? " ⚠ OVERDUE" : ""}</span>` : ""}
+      ${partBadge(t.part)}
+      ${(t.task_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
+      ${(t.task_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join("")}
+    </div>
+    <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">Assignees: ${(t.task_assignees || []).map((a) => `<span class="name-tag">${esc(staffName(a.staff_id))}</span>`).join("") || "unassigned"} · created by ${esc(staffName(t.created_by))} · last F/up ${agoTxt(t.last_fup)}</div>
+    ${t.body ? `<div class="field"><label>Details</label><div style="white-space:pre-wrap;font-size:13.5px;line-height:1.6">${esc(t.body)}</div></div>` : ""}
+    <div class="field"><label>Comments (${comments.length})</label>
+      <div style="max-height:260px;overflow-y:auto">
+      ${comments.map((c) => `<div class="cmt">
+        <div class="cmt-meta"><span><b>${esc(staffName(c.author_id))}</b> · ${fmtD(c.created_at.slice(0, 10))} ${fmt12(c.created_at.slice(11, 16))}</span>
+        <span>${c.needs_ack ? (c.acked_by ? `<span class="ack-done">✔ Handled by ${esc(staffName(c.acked_by))}</span>` : amInvolved ? `<button class="ack-btn" data-ack="${c.id}">⏳ Action needed — mark handled</button>` : `<span class="ack-btn" style="cursor:default">⏳ Action needed</span>`) : ""}</span></div>
+        <div style="white-space:pre-wrap">${esc(c.body)}</div></div>`).join("") || `<div style="font-size:12.5px;color:var(--ink-2)">No comments yet.</div>`}
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <input id="tkNewCmt" placeholder="Add a comment / F-up note..." style="flex:1;padding:8px 10px;border:1.5px solid var(--line);border-radius:7px" />
+        <button class="btn sm" id="tkCmtGo">Post</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      ${canDelete ? `<button class="btn ghost" id="tkDel" style="color:var(--red)">Delete</button>` : ""}
+      ${amInvolved ? `<button class="btn ghost" id="tkPlanBtn">📅 Create plan</button><button class="btn ghost" id="tkEdit">Edit</button>` : ""}
+      <button class="btn" onclick="closeModal()">Close</button>
+    </div>`);
+  document.querySelectorAll("[data-ack]").forEach((b) => (b.onclick = async () => {
+    const { error } = await sb.from("task_comments").update({ acked_by: ME.id, acked_at: new Date().toISOString() }).eq("id", b.dataset.ack);
+    if (error) return alert("Failed: " + error.message);
+    taskDetail(taskId);
+  }));
+  $("#tkCmtGo").onclick = async () => {
+    const body = $("#tkNewCmt").value.trim();
+    if (!body) return;
+    const needsAck = (ME.role !== "member" || ME.is_admin) && !(t.task_assignees || []).some((a) => a.staff_id === ME.id);
+    const { error } = await sb.from("task_comments").insert({ task_id: taskId, author_id: ME.id, body, needs_ack: needsAck });
+    if (error) return alert("Failed: " + error.message);
+    t.last_fup = new Date().toISOString();
+    taskDetail(taskId);
+  };
+  $("#tkNewCmt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#tkCmtGo").click(); });
+  if ($("#tkEdit")) $("#tkEdit").onclick = () => taskModal(t);
+  if ($("#tkDel")) $("#tkDel").onclick = async () => {
+    if (!confirm("Delete this task and all its comments?")) return;
+    await sb.from("tasks").delete().eq("id", taskId);
+    closeModal(); renderBoard();
+  };
+  if ($("#tkPlanBtn")) $("#tkPlanBtn").onclick = () => {
+    closeModal(); switchView("plan");
+    setTimeout(() => planModal(null, null, null, { task: t }), 300);
+  };
+}
+
+function todoModal(edit = null) {
+  const pickedCos = new Set(edit ? (edit.todo_companies || []).map((c) => c.company_id) : []);
+  const pickedCts = new Set(); // todos: companies only
+  openModal(`
+    <h3>${edit ? "Edit to-do" : "New to-do"}</h3>
+    <div class="field"><label>Title</label><input id="tdTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Send Woodward LECM inquiry" /></div>
+    <div class="row2">
+      <div class="field"><label>Due date (optional)</label><input type="date" id="tdDue" value="${edit?.due_date || ""}" /></div>
+      <div class="field"><label>&nbsp;</label><div style="font-size:12px;color:var(--ink-2);padding-top:8px">Visible to your part${isExec() || ME.is_admin ? " (and execs)" : ""}.</div></div>
+    </div>
+    <div class="field"><label>Notes (optional)</label><textarea id="tdBody">${esc(edit?.body || "")}</textarea></div>
+    ${tagPanelHTML()}
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="tdSave">${edit ? "Save" : "Add"}</button></div>`);
+  bindTagPanel(pickedCos, pickedCts);
+  $("#ctWrap").style.display = "none"; // hide contracts for todos
+  $("#tdSave").onclick = async () => {
+    const rec = { title: $("#tdTitle").value.trim(), body: $("#tdBody").value.trim() || null, due_date: $("#tdDue").value || null };
+    if (!rec.title) return alert("Title is required.");
+    let todoId;
+    if (edit) {
+      const { error } = await sb.from("todos").update(rec).eq("id", edit.id);
+      if (error) return alert("Save failed: " + error.message);
+      todoId = edit.id;
+    } else {
+      const { data, error } = await sb.from("todos").insert({ ...rec, staff_id: ME.id, part: ME.part }).select("id").single();
+      if (error) return alert("Save failed: " + error.message);
+      todoId = data.id;
+    }
+    await sb.from("todo_companies").delete().eq("todo_id", todoId);
+    if (pickedCos.size) await sb.from("todo_companies").insert([...pickedCos].map((id) => ({ todo_id: todoId, company_id: id })));
+    closeModal(); renderBoard();
+  };
+}
+
+async function todoDetail(todoId) {
+  const td = (window.__todos || []).find((x) => x.id === todoId);
+  if (!td) return;
+  const { data: cs } = await sb.from("todo_comments").select("*").eq("todo_id", todoId).order("created_at");
+  const comments = cs || [];
+  const mine = td.staff_id === ME.id;
+  openModal(`
+    <h3>${td.done ? "✔ " : ""}${esc(td.title)}</h3>
+    <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">
+      <span class="name-tag">${esc(staffName(td.staff_id))}</span>
+      ${td.due_date ? ` DUE ${fmtD(td.due_date)}` : ""} · last F/up ${agoTxt(td.last_fup)}
+      ${(td.todo_companies || []).map((c) => ` <span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
+    </div>
+    ${td.body ? `<div class="field"><label>Notes</label><div style="white-space:pre-wrap;font-size:13.5px">${esc(td.body)}</div></div>` : ""}
+    <div class="field"><label>Comments (${comments.length})</label>
+      ${comments.map((c) => `<div class="cmt">
+        <div class="cmt-meta"><span><b>${esc(staffName(c.author_id))}</b> · ${fmtD(c.created_at.slice(0, 10))}</span>
+        <span>${c.needs_ack ? (c.acked_by ? `<span class="ack-done">✔ Handled</span>` : mine ? `<button class="ack-btn" data-tdack="${c.id}">⏳ Action needed — mark handled</button>` : `<span class="ack-btn" style="cursor:default">⏳ Action needed</span>`) : ""}</span></div>
+        <div style="white-space:pre-wrap">${esc(c.body)}</div></div>`).join("") || `<div style="font-size:12.5px;color:var(--ink-2)">No comments yet.</div>`}
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <input id="tdNewCmt" placeholder="Comment..." style="flex:1;padding:8px 10px;border:1.5px solid var(--line);border-radius:7px" />
+        <button class="btn sm" id="tdCmtGo">Post</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      ${mine ? `<button class="btn ghost" id="tdDel" style="color:var(--red)">Delete</button>
+        <button class="btn ghost" id="tdPlanBtn">📅 Create plan</button>
+        <button class="btn ghost" id="tdEditBtn">Edit</button>
+        <button class="btn ${td.done ? "ghost" : "navy"}" id="tdToggle">${td.done ? "Reopen" : "✔ Mark done"}</button>` : ""}
+      <button class="btn ${mine ? "ghost" : ""}" onclick="closeModal()">Close</button>
+    </div>`);
+  document.querySelectorAll("[data-tdack]").forEach((b) => (b.onclick = async () => {
+    await sb.from("todo_comments").update({ acked_by: ME.id, acked_at: new Date().toISOString() }).eq("id", b.dataset.tdack);
+    todoDetail(todoId);
+  }));
+  $("#tdCmtGo").onclick = async () => {
+    const body = $("#tdNewCmt").value.trim();
+    if (!body) return;
+    const needsAck = !mine && (ME.role !== "member" || ME.is_admin);
+    const { error } = await sb.from("todo_comments").insert({ todo_id: todoId, author_id: ME.id, body, needs_ack: needsAck });
+    if (error) return alert("Failed: " + error.message);
+    td.last_fup = new Date().toISOString();
+    todoDetail(todoId);
+  };
+  if ($("#tdToggle")) $("#tdToggle").onclick = async () => {
+    await sb.from("todos").update({ done: !td.done }).eq("id", todoId);
+    closeModal(); renderBoard();
+  };
+  if ($("#tdEditBtn")) $("#tdEditBtn").onclick = () => todoModal(td);
+  if ($("#tdDel")) $("#tdDel").onclick = async () => {
+    if (!confirm("Delete this to-do?")) return;
+    await sb.from("todos").delete().eq("id", todoId);
+    closeModal(); renderBoard();
+  };
+  if ($("#tdPlanBtn")) $("#tdPlanBtn").onclick = () => {
+    closeModal(); switchView("plan");
+    setTimeout(() => planModal(null, null, null, { todo: td }), 300);
   };
 }
 
@@ -642,7 +967,7 @@ function switchView(v) {
   currentView = v; openedReportId = null;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   charts.forEach((c) => c.destroy()); charts = [];
-  ({ dashboard: renderDashboard, activities: renderActivities, plan: renderPlan, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard)();
+  ({ dashboard: renderDashboard, activities: renderActivities, plan: renderPlan, board: renderBoard, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard)();
 }
 
 /* ---------------- Period helpers ---------------- */
@@ -692,7 +1017,7 @@ async function renderDashboard() {
   const yFrom = `${yr}-01-01`, yTo = `${yr}-12-31`;
   const wkStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
   const wkEnd = (() => { const d = new Date(wkStart); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10); })();
-  const [compQ, partQ, indivQ, targetQ, halfPartQ, scoreQ, pScoreQ, sTgtQ, wkPlanQ] = await Promise.all([
+  const [compQ, partQ, indivQ, targetQ, halfPartQ, scoreQ, pScoreQ, sTgtQ, wkPlanQ, myTaskQ] = await Promise.all([
     sb.rpc("company_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("part_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("activity_stats", { p_from: r.from, p_to: r.to }),
@@ -702,6 +1027,7 @@ async function renderDashboard() {
     sb.rpc("part_scores", { p_from: yFrom, p_to: yTo }),
     sb.from("score_targets").select("*").eq("year", yr),
     sb.from("plans").select("*, plan_participants(staff_id)").eq("status", "confirmed").gte("plan_date", wkStart).lte("plan_date", wkEnd).order("plan_date").order("plan_time"),
+    sb.from("tasks").select("*, task_assignees(staff_id)").in("status", ["open", "progress"]).order("due_date", { ascending: true, nullsFirst: false }),
   ]);
   if (!$("#dashBody")) return; // view switched while loading
   if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
@@ -709,6 +1035,9 @@ async function renderDashboard() {
   const targets = targetQ.data || [], halfPart = halfPartQ.data || [];
   const scores = scoreQ.data || [], pScores = pScoreQ.data || [], sTgts = sTgtQ.data || [];
   const myWkPlans = (wkPlanQ.data || []).filter((p) => (p.plan_participants || []).some((x) => x.staff_id === ME.id) || p.created_by === ME.id);
+  const impRank = { high: 0, mid: 1, low: 2 };
+  const myTasks = (myTaskQ.data || []).filter((t) => (t.task_assignees || []).some((a) => a.staff_id === ME.id))
+    .sort((a, b) => impRank[a.importance] - impRank[b.importance]).slice(0, 5);
   const types = ["meeting", "vc", "trip", "other"];
 
   // ----- company KPI -----
@@ -791,6 +1120,15 @@ async function renderDashboard() {
       </div>
       <div>
         <div class="card" style="margin-bottom:16px">
+          <h2 style="font-size:15px;margin-bottom:8px">📌 My tasks</h2>
+          ${myTasks.length ? myTasks.map((t) => {
+            const over = t.due_date && t.due_date < new Date().toISOString().slice(0, 10);
+            return `<div data-gotask style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line);display:flex;justify-content:space-between;gap:8px">
+              <span><span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span> ${esc(t.title)}</span>
+              ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}" style="white-space:nowrap">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}</div>`;
+          }).join("") : `<div style="font-size:12.5px;color:var(--ink-2)">No assigned tasks. 🎉 Check the Workboard.</div>`}
+        </div>
+        <div class="card" style="margin-bottom:16px">
           <h2 style="font-size:15px;margin-bottom:8px">📅 My plans this week</h2>
           ${myWkPlans.length ? myWkPlans.map((p) => `<div data-goplan style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)">
             <b>${fmtD(p.plan_date).slice(5)}</b>${p.plan_time ? " " + fmtT(p.plan_time) : ""} · ${esc(p.title)} ${partBadge(p.part)}</div>`).join("")
@@ -853,6 +1191,7 @@ async function renderDashboard() {
 
   document.querySelectorAll("[data-rev]").forEach((el) => (el.onclick = () => openReport(Number(el.dataset.rev))));
   document.querySelectorAll("[data-goplan]").forEach((el) => (el.onclick = () => switchView("plan")));
+  document.querySelectorAll("[data-gotask]").forEach((el) => (el.onclick = () => switchView("board")));
   if ($("#btnTargets")) $("#btnTargets").onclick = () => targetsModal();
   if ($("#btnScoreTgt")) $("#btnScoreTgt").onclick = () => scoreTargetsModal();
 
@@ -1355,6 +1694,11 @@ function reportModal(edit = null, fromActivity = null) {
       const { data, error } = await sb.from("reports").insert({ ...rec, status: "submitted", author_id: ME.id, part: ME.part, activity_id: fromActivity?.id || null }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
       repId = data.id;
+      if (fromActivity?.plan_id) {
+        const { data: pl } = await sb.from("plans").select("task_id,todo_id").eq("id", fromActivity.plan_id).maybeSingle();
+        if (pl?.task_id) await sb.from("task_comments").insert({ task_id: pl.task_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
+        if (pl?.todo_id) await sb.from("todo_comments").insert({ todo_id: pl.todo_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
+      }
       await logEvent(repId, "create", null, 1, rec.content, rec.followup);
       await logEvent(repId, "submit", null, 1, rec.content, rec.followup);
     }
