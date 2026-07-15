@@ -260,3 +260,29 @@ tr.clickable:hover { background: #f7fafc; cursor: pointer; }
 .plan-chip { display: block; margin: 2px 0; padding: 2px 6px; border-radius: 5px; background: #f0f4f8; font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 3px solid var(--navy); }
 .plan-chip.pending { border-style: dashed; border-width: 1.5px 1.5px 1.5px 3px; background: #fffdf3; }
 .plan-chip.rejected { background: #fff0f0; border-left-color: var(--red) !important; text-decoration: line-through; opacity: .75; }
+
+/* ===== Workboard (v9) ===== */
+.board-cols { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: start; }
+.board-col-head { font-size: 12px; font-weight: 800; letter-spacing: .4px; padding: 7px 10px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; }
+.tcard { position: relative; overflow: hidden; border-radius: 10px; border: 1.5px solid rgba(0,0,0,.08); padding: 10px 12px; margin-bottom: 10px; cursor: pointer; box-shadow: 0 1px 3px rgba(10,42,67,.08); transition: transform .1s, box-shadow .1s; }
+.tcard:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(10,42,67,.14); }
+.tcard.overdue { border: 2px solid var(--red); }
+.tcard.dead { background: #e9ecef !important; filter: grayscale(1); opacity: .65; }
+.tcard.dead .tcard-title { text-decoration: line-through; color: #6c757d; }
+.tcard-wm { position: absolute; right: -4px; bottom: -8px; font-size: 30px; font-weight: 900; opacity: .07; pointer-events: none; white-space: nowrap; }
+.tcard-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; gap: 6px; }
+.tcard-title { font-weight: 700; font-size: 13.5px; line-height: 1.35; margin-bottom: 7px; }
+.tcard-foot { display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--ink-2); }
+.imp { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 10px; letter-spacing: .4px; }
+.imp.high { background: #ffe3e3; color: #c92a2a; }
+.imp.mid { background: #fff3bf; color: #b08800; }
+.imp.low { background: #e7edf3; color: #5a6b7d; }
+.due-chip { font-size: 10.5px; font-weight: 700; color: var(--ink-2); white-space: nowrap; }
+.due-chip.over { color: var(--red); }
+.name-tag { display: inline-block; font-size: 10.5px; background: rgba(255,255,255,.75); border: 1px solid rgba(0,0,0,.1); border-radius: 9px; padding: 1px 7px; margin-right: 3px; font-weight: 600; }
+.cmt { border-bottom: 1px dashed var(--line); padding: 8px 0; font-size: 13px; }
+.cmt-meta { font-size: 11px; color: var(--ink-2); margin-bottom: 2px; display: flex; justify-content: space-between; gap: 8px; }
+.ack-btn { font-size: 10.5px; font-weight: 700; border: 1.5px solid var(--amber); color: #b08800; background: #fff9e6; border-radius: 9px; padding: 1px 8px; cursor: pointer; }
+.ack-done { font-size: 10.5px; font-weight: 700; color: var(--green-dark); }
+.todo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+@media (max-width: 1100px) { .board-cols { grid-template-columns: repeat(2, 1fr); } }
