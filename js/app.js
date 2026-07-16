@@ -456,58 +456,103 @@ function planDetailModal(p) {
 }
 
 /* =========================================================
-   WORKBOARD (v9): part task boards + personal to-dos
+   WORKBOARD (v10): free-canvas task board + to-do side panel
    ========================================================= */
 var boardPart = null;
-const CO_TINTS = ["#fff3b0", "#ffd6d6", "#d6e8ff", "#d9f7d9", "#f3e0ff", "#ffe4c4", "#d9f2f2", "#ffe0ef"];
-const companyTint = (id) => CO_TINTS[Number(id) % CO_TINTS.length];
-const TASK_ST = { open: "Open / Discussing", progress: "In Progress", done: "Done", canceled: "Canceled" };
-const TASK_ST_COLOR = { open: "#e7edf3", progress: "#dbe9ff", done: "#d9f7d9", canceled: "#e9ecef" };
-const IMP_LABEL = { high: "HIGH", mid: "MID", low: "LOW" };
+var boardShow = { done: true, canceled: true };
+const TASK_ST = { progress: "In Progress", done: "Done", canceled: "Canceled" };
+const STAFF_PALETTE = ["#2e7cf6", "#00a651", "#f0a020", "#9b59d0", "#e5568c", "#12a5a5", "#e2574c", "#5a6b7d", "#7cb518", "#ff7f50", "#4a6fa5", "#b8860b"];
+const staffColor = (id) => STAFF.find((x) => x.id === id)?.color || "#cfd6dd";
+const nameTag = (id) => { const c = staffColor(id); return `<span class="name-tag" style="background:${c}26;border-color:${c}88;color:#1f2937">${esc(staffName(id))}</span>`; };
 const agoTxt = (ts) => { const d = Math.floor((Date.now() - new Date(ts)) / 86400000); return d <= 0 ? "today" : d + "d ago"; };
+const amountTxt = (a) => (a === null || a === undefined || a === "" ? "" : `$${Number(a)}K`);
+
+function cardBG(t) {
+  if (t.status === "canceled") return "#e9ecef";
+  const cols = (t.task_assignees || []).map((a) => staffColor(a.staff_id) + "2e");
+  if (!cols.length) return "#f4f6f8";
+  if (cols.length === 1) return cols[0];
+  const step = 100 / cols.length;
+  const stops = cols.map((c, i) => `${c} ${i * step}%, ${c} ${(i + 1) * step}%`).join(", ");
+  return `linear-gradient(135deg, ${stops})`;
+}
+function wmHTML(t) {
+  const co = (t.task_companies || [])[0];
+  if (!co) return "";
+  const name = esc(companyName(co.company_id));
+  if (t.status === "canceled") return `<div class="tcard-wm"><span style="color:#9aa3ab">${name}</span></div>`;
+  if (t.status === "done") return `<div class="tcard-wm"><span style="color:var(--green)">${name}</span></div>`;
+  return `<div class="tcard-wm"><span style="background:linear-gradient(to top, var(--green) 50%, #b9c2cb 50%);-webkit-background-clip:text;background-clip:text;color:transparent">${name}</span></div>`;
+}
 
 async function renderBoard() {
   if (!boardPart) boardPart = ME.part;
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Workboard</div>
-    <div class="page-sub">Key projects & follow-ups per part. Card color follows the customer. Click a card for details, comments and actions.</div>
+    <div class="page-sub">Drag cards anywhere — the layout is shared. Watermark fill shows status: half = in progress, full green = done, gray = canceled. Card color = assignees' colors.</div>
     <div class="filterbar" style="align-items:center">
       <div class="seg">${PARTS.map((p) => `<button data-bpart="${esc(p.name)}" class="${boardPart === p.name ? "active" : ""}">${esc(p.name)}</button>`).join("")}</div>
-      <button class="btn" id="btnNewTask" style="margin-left:auto">+ New task</button>
+      <label style="font-size:12px;margin-left:10px"><input type="checkbox" id="bShowDone" ${boardShow.done ? "checked" : ""}/> Done</label>
+      <label style="font-size:12px"><input type="checkbox" id="bShowCx" ${boardShow.canceled ? "checked" : ""}/> Canceled</label>
+      ${isManager() ? `<button class="btn ghost sm" id="btnColors" style="margin-left:auto">🎨 Member colors</button>` : `<span style="margin-left:auto"></span>`}
+      <button class="btn" id="btnNewTask">+ New task</button>
     </div>
-    <div id="boardBody" class="empty">Loading...</div>
-    <div class="section-head" style="margin-top:22px"><h2>✅ ${esc(boardPart)} — personal to-dos</h2>
-      ${boardPart === ME.part ? `<button class="btn ghost" id="btnNewTodo">+ My to-do</button>` : ""}</div>
-    <div id="todoBody" class="empty">Loading...</div>`;
+    <div style="display:flex;gap:14px;align-items:flex-start">
+      <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>
+      <aside class="todo-aside">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <b style="font-size:13.5px">✅ To-dos — ${esc(boardPart)}</b>
+          ${boardPart === ME.part ? `<button class="btn sm" id="btnNewTodo">+ Mine</button>` : ""}
+        </div>
+        <div id="todoBody" class="empty" style="padding:10px">Loading...</div>
+      </aside>
+    </div>`;
   document.querySelectorAll("[data-bpart]").forEach((b) => (b.onclick = () => { boardPart = b.dataset.bpart; renderBoard(); }));
+  $("#bShowDone").onchange = (e) => { boardShow.done = e.target.checked; renderBoard(); };
+  $("#bShowCx").onchange = (e) => { boardShow.canceled = e.target.checked; renderBoard(); };
   $("#btnNewTask").onclick = () => taskModal();
   if ($("#btnNewTodo")) $("#btnNewTodo").onclick = () => todoModal();
+  if ($("#btnColors")) $("#btnColors").onclick = () => memberColorsModal();
 
   const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }] = await Promise.all([
-    sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart).order("last_fup", { ascending: false }),
+    sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart),
     sb.from("task_comments").select("id,task_id,needs_ack,acked_by"),
     sb.from("todos").select("*, todo_companies(company_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
     sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
   ]);
-  const tasks = tRaw || [], cmts = cRaw || [], todos = tdRaw || [], tdCmts = tdcRaw || [];
+  let tasks = tRaw || [];
+  const cmts = cRaw || [], todos = tdRaw || [], tdCmts = tdcRaw || [];
   window.__tasks = tasks; window.__todos = todos;
-  if (!$("#boardBody")) return;
+  if (!$("#boardCanvas")) return;
 
+  tasks = tasks.filter((t) => (t.status !== "done" || boardShow.done) && (t.status !== "canceled" || boardShow.canceled));
+  // 초기 정렬: 금액 큰 순 (위치 미지정 카드의 자동 배치 순서)
+  tasks.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0));
+
+  const CW = 250, CH = 165, COLS = 3;
+  let autoIdx = 0;
   const cardHTML = (t) => {
-    const co = (t.task_companies || [])[0];
-    const tint = t.status === "canceled" ? "#e9ecef" : co ? companyTint(co.company_id) : "#ffffff";
-    const wm = co ? companyName(co.company_id) : "";
-    const over = t.due_date && t.status !== "done" && t.status !== "canceled" && t.due_date < new Date().toISOString().slice(0, 10);
+    let x = t.pos_x, y = t.pos_y;
+    if (x === null || x === undefined || y === null || y === undefined) {
+      x = 12 + (autoIdx % COLS) * (CW + 14);
+      y = 12 + Math.floor(autoIdx / COLS) * (CH + 14);
+      autoIdx++;
+    }
+    const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
     const n = cmts.filter((c) => c.task_id === t.id);
     const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
-    return `<div class="tcard ${t.status === "canceled" ? "dead" : ""} ${over ? "overdue" : ""}" data-task="${t.id}" style="background:${tint}">
-      ${wm ? `<div class="tcard-wm">${esc(wm)}</div>` : ""}
+    return `<div class="tcard ${t.status === "canceled" ? "dead" : ""} ${over ? "overdue" : ""}" draggable="true"
+      data-task="${t.id}" style="background:${cardBG(t)};position:absolute;left:${x}px;top:${y}px;width:${CW}px">
+      ${wmHTML(t)}
       <div class="tcard-top">
-        <span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span>
+        <span style="display:flex;gap:5px;align-items:center">
+          ${t.amount !== null && t.amount !== undefined && t.amount !== "" ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(t.amount)}</span>` : ""}
+          ${t.status === "done" ? `<span class="imp low" style="background:#d9f7d9;color:var(--green-dark)">✔ DONE</span>` : ""}
+        </span>
         ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}
       </div>
       <div class="tcard-title">${esc(t.title)}</div>
-      <div style="margin-bottom:6px">${(t.task_assignees || []).map((a) => `<span class="name-tag">${esc(staffName(a.staff_id))}</span>`).join("") || `<span style="font-size:10.5px;color:var(--ink-2)">unassigned</span>`}</div>
+      <div style="margin-bottom:6px">${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || `<span style="font-size:10.5px;color:var(--ink-2)">unassigned</span>`}</div>
       <div class="tcard-foot">
         <span>F/up ${agoTxt(t.last_fup)}</span>
         <span>${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬 ${n.length}</span>
@@ -515,41 +560,86 @@ async function renderBoard() {
     </div>`;
   };
 
-  $("#boardBody").innerHTML = `<div class="board-cols">
-    ${Object.entries(TASK_ST).map(([st, label]) => {
-      const list = tasks.filter((t) => t.status === st);
-      return `<div>
-        <div class="board-col-head" style="background:${TASK_ST_COLOR[st]}">
-          <span>${st === "canceled" ? "✖ " : st === "done" ? "✔ " : ""}${label}</span><span>${list.length}</span></div>
-        ${list.map(cardHTML).join("") || `<div style="font-size:12px;color:var(--ink-2);text-align:center;padding:14px 0">—</div>`}
-      </div>`;
-    }).join("")}
-  </div>`;
-  document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
+  const canvasH = Math.max(560, (Math.floor((tasks.length - 1) / COLS) + 1) * (CH + 14) + 240);
+  $("#boardCanvas").style.minHeight = canvasH + "px";
+  $("#boardCanvas").innerHTML = tasks.map(cardHTML).join("") ||
+    `<div class="empty" style="padding-top:60px">No tasks in ${esc(boardPart)}. Create the first one!</div>`;
 
+  // click → detail
+  document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
+  // drag & drop (shared positions)
+  const canvas = $("#boardCanvas");
+  let dragEl = null, dx = 0, dy = 0;
+  document.querySelectorAll("[data-task]").forEach((el) => {
+    el.addEventListener("dragstart", (e) => {
+      dragEl = el;
+      const r = el.getBoundingClientRect();
+      dx = e.clientX - r.left; dy = e.clientY - r.top;
+      e.dataTransfer.effectAllowed = "move";
+    });
+  });
+  canvas.addEventListener("dragover", (e) => e.preventDefault());
+  canvas.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    if (!dragEl) return;
+    const cr = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.round(e.clientX - cr.left - dx));
+    const y = Math.max(0, Math.round(e.clientY - cr.top - dy));
+    dragEl.style.left = x + "px"; dragEl.style.top = y + "px";
+    const id = Number(dragEl.dataset.task);
+    dragEl = null;
+    const { error } = await sb.from("tasks").update({ pos_x: x, pos_y: y }).eq("id", id);
+    if (error) alert("Position not saved (only people involved in a task can move it): " + error.message);
+  });
+
+  // ----- to-do side panel (compact table) -----
   if (!$("#todoBody")) return;
-  const todoCard = (td) => {
-    const co = (td.todo_companies || [])[0];
-    const tint = td.done ? "#eef4ee" : co ? companyTint(co.company_id) : "#fffdf3";
+  $("#todoBody").innerHTML = todos.length ? todos.map((td) => {
     const n = tdCmts.filter((c) => c.todo_id === td.id);
     const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
     const over = td.due_date && !td.done && td.due_date < new Date().toISOString().slice(0, 10);
-    return `<div class="tcard ${over ? "overdue" : ""}" data-todo="${td.id}" style="background:${tint};${td.done ? "opacity:.6" : ""}">
-      <div class="tcard-top">
-        <span class="name-tag">${esc(staffName(td.staff_id))}${td.staff_id === ME.id ? " (me)" : ""}</span>
-        ${td.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(td.due_date).slice(5)}</span>` : ""}
-      </div>
-      <div class="tcard-title" style="${td.done ? "text-decoration:line-through" : ""}">${td.done ? "✔ " : ""}${esc(td.title)}</div>
-      <div class="tcard-foot">
-        <span>${co ? esc(companyName(co.company_id)) : ""}</span>
-        <span>${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬 ${n.length}</span>
-      </div>
+    return `<div class="todo-row ${td.done ? "tdone" : ""}" data-todo="${td.id}">
+      <span class="todo-check" data-tdchk="${td.id}" title="${td.done ? "Reopen" : "Mark done"}">${td.done ? "✔" : "○"}</span>
+      <span style="flex:1;min-width:0">
+        <div style="font-size:12.5px;font-weight:600;${td.done ? "text-decoration:line-through;color:var(--ink-2)" : ""};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(td.title)}</div>
+        <div style="font-size:10.5px;color:var(--ink-2)">${nameTag(td.staff_id)}${td.due_date ? ` <span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(td.due_date).slice(5)}</span>` : ""}</div>
+      </span>
+      <span style="font-size:10.5px;color:var(--ink-2);white-space:nowrap">${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬${n.length}</span>
     </div>`;
-  };
-  $("#todoBody").innerHTML = todos.length
-    ? `<div class="todo-grid">${todos.map(todoCard).join("")}</div>`
-    : `<div class="empty">No to-dos in ${esc(boardPart)} yet.</div>`;
-  document.querySelectorAll("[data-todo]").forEach((el) => (el.onclick = () => todoDetail(Number(el.dataset.todo))));
+  }).join("") : `<div style="font-size:12px;color:var(--ink-2)">No to-dos yet.</div>`;
+  document.querySelectorAll("[data-todo]").forEach((el) => (el.onclick = (e) => {
+    if (e.target.dataset.tdchk) return;
+    todoDetail(Number(el.dataset.todo));
+  }));
+  document.querySelectorAll("[data-tdchk]").forEach((el) => (el.onclick = async () => {
+    const td = todos.find((x) => x.id == el.dataset.tdchk);
+    if (td.staff_id !== ME.id) return alert("Only the owner can check off a to-do.");
+    await sb.from("todos").update({ done: !td.done }).eq("id", td.id);
+    renderBoard();
+  }));
+}
+
+function memberColorsModal() {
+  const list = STAFF.filter((x) => x.status === "active" && (isExec() || ME.is_admin ? true : x.part === ME.part));
+  openModal(`
+    <h3>🎨 Member colors</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Card backgrounds use assignees' colors. ${isExec() || ME.is_admin ? "" : "You can set colors for your part."}</p>
+    <div style="max-height:340px;overflow-y:auto">
+    ${list.map((x) => `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line)">
+      <span style="width:130px;font-size:13px"><b>${esc(x.name)}</b> <span style="font-size:10.5px;color:var(--ink-2)">${esc(x.part)}</span></span>
+      <span style="display:flex;gap:5px;flex-wrap:wrap">
+        ${STAFF_PALETTE.map((c) => `<span data-setcol="${x.id}|${c}" style="width:20px;height:20px;border-radius:50%;background:${c};cursor:pointer;display:inline-block;border:2.5px solid ${x.color === c ? "var(--navy)" : "transparent"}"></span>`).join("")}
+      </span>
+    </div>`).join("")}
+    </div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">Done</button></div>`);
+  document.querySelectorAll("[data-setcol]").forEach((sw) => (sw.onclick = async () => {
+    const [sid, color] = sw.dataset.setcol.split("|");
+    const { error } = await sb.rpc("set_staff_color", { p_staff_id: Number(sid), p_color: color });
+    if (error) return alert("Failed: " + error.message);
+    const st = STAFF.find((x) => x.id == sid); if (st) st.color = color;
+    memberColorsModal();
+  }));
 }
 
 function taskModal(edit = null) {
@@ -561,8 +651,7 @@ function taskModal(edit = null) {
     <h3>${edit ? "Edit task" : "New task — " + esc(boardPart)}</h3>
     <div class="field"><label>Title (project / follow-up item)</label><input id="tkTitle" value="${esc(edit?.title || "")}" placeholder="e.g. COSCO Bow Thruster replacement F/up" /></div>
     <div class="row2">
-      <div class="field"><label>Importance</label><select id="tkImp">
-        ${Object.entries(IMP_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.importance === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+      <div class="field"><label>Amount (K$, optional)</label><input type="number" min="0" step="1" id="tkAmt" value="${edit?.amount ?? ""}" placeholder="e.g. 15 → $15K" /></div>
       <div class="field"><label>Due date (optional)</label><input type="date" id="tkDue" value="${edit?.due_date || ""}" /></div>
     </div>
     ${edit ? `<div class="field"><label>Status</label><select id="tkSt">
@@ -584,8 +673,9 @@ function taskModal(edit = null) {
   bindTagPanel(pickedCos, pickedCts);
   $("#tkPick").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
   $("#tkSave").onclick = async () => {
+    const amt = $("#tkAmt").value;
     const rec = { title: $("#tkTitle").value.trim(), body: $("#tkBody").value.trim() || null,
-      importance: $("#tkImp").value, due_date: $("#tkDue").value || null };
+      amount: amt === "" ? null : Number(amt), due_date: $("#tkDue").value || null };
     if (edit) rec.status = $("#tkSt").value;
     if (!rec.title) return alert("Title is required.");
     let taskId;
@@ -616,18 +706,18 @@ async function taskDetail(taskId) {
   const amInvolved = t.created_by === ME.id || (t.task_assignees || []).some((a) => a.staff_id === ME.id)
     || (ME.role === "leader" && t.part === ME.part) || isExec() || ME.is_admin;
   const canDelete = (ME.role === "leader" && t.part === ME.part) || isExec() || ME.is_admin;
-  const over = t.due_date && t.status !== "done" && t.status !== "canceled" && t.due_date < new Date().toISOString().slice(0, 10);
+  const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
   openModal(`
     <h3>${esc(t.title)}</h3>
     <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      <span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span>
-      <span class="badge ${t.status === "done" ? "approved" : t.status === "canceled" ? "returned" : t.status === "progress" ? "submitted" : "pending"}">${TASK_ST[t.status]}</span>
+      ${t.amount !== null && t.amount !== undefined ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(t.amount)}</span>` : ""}
+      <span class="badge ${t.status === "done" ? "approved" : t.status === "canceled" ? "returned" : "submitted"}">${TASK_ST[t.status]}</span>
       ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date)}${over ? " ⚠ OVERDUE" : ""}</span>` : ""}
       ${partBadge(t.part)}
       ${(t.task_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
       ${(t.task_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join("")}
     </div>
-    <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">Assignees: ${(t.task_assignees || []).map((a) => `<span class="name-tag">${esc(staffName(a.staff_id))}</span>`).join("") || "unassigned"} · created by ${esc(staffName(t.created_by))} · last F/up ${agoTxt(t.last_fup)}</div>
+    <div style="font-size:12px;color:var(--ink-2);margin-bottom:8px">Assignees: ${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || "unassigned"} · created by ${esc(staffName(t.created_by))} · last F/up ${agoTxt(t.last_fup)}</div>
     ${t.body ? `<div class="field"><label>Details</label><div style="white-space:pre-wrap;font-size:13.5px;line-height:1.6">${esc(t.body)}</div></div>` : ""}
     <div class="field"><label>Comments (${comments.length})</label>
       <div style="max-height:260px;overflow-y:auto">
@@ -643,8 +733,9 @@ async function taskDetail(taskId) {
     </div>
     <div class="modal-actions">
       ${canDelete ? `<button class="btn ghost" id="tkDel" style="color:var(--red)">Delete</button>` : ""}
-      ${amInvolved ? `<button class="btn ghost" id="tkPlanBtn">📅 Create plan</button><button class="btn ghost" id="tkEdit">Edit</button>` : ""}
-      <button class="btn" onclick="closeModal()">Close</button>
+      ${amInvolved ? `<button class="btn ghost" id="tkPlanBtn">📅 Create plan</button><button class="btn ghost" id="tkEdit">Edit</button>
+        ${t.status === "progress" ? `<button class="btn navy" id="tkDone">✔ Mark done</button>` : ""}` : ""}
+      <button class="btn ${amInvolved ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
   document.querySelectorAll("[data-ack]").forEach((b) => (b.onclick = async () => {
     const { error } = await sb.from("task_comments").update({ acked_by: ME.id, acked_at: new Date().toISOString() }).eq("id", b.dataset.ack);
@@ -662,6 +753,10 @@ async function taskDetail(taskId) {
   };
   $("#tkNewCmt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#tkCmtGo").click(); });
   if ($("#tkEdit")) $("#tkEdit").onclick = () => taskModal(t);
+  if ($("#tkDone")) $("#tkDone").onclick = async () => {
+    await sb.from("tasks").update({ status: "done" }).eq("id", taskId);
+    closeModal(); renderBoard();
+  };
   if ($("#tkDel")) $("#tkDel").onclick = async () => {
     if (!confirm("Delete this task and all its comments?")) return;
     await sb.from("tasks").delete().eq("id", taskId);
@@ -675,7 +770,7 @@ async function taskDetail(taskId) {
 
 function todoModal(edit = null) {
   const pickedCos = new Set(edit ? (edit.todo_companies || []).map((c) => c.company_id) : []);
-  const pickedCts = new Set(); // todos: companies only
+  const pickedCts = new Set();
   openModal(`
     <h3>${edit ? "Edit to-do" : "New to-do"}</h3>
     <div class="field"><label>Title</label><input id="tdTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Send Woodward LECM inquiry" /></div>
@@ -688,7 +783,7 @@ function todoModal(edit = null) {
     <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="tdSave">${edit ? "Save" : "Add"}</button></div>`);
   bindTagPanel(pickedCos, pickedCts);
-  $("#ctWrap").style.display = "none"; // hide contracts for todos
+  $("#ctWrap").style.display = "none";
   $("#tdSave").onclick = async () => {
     const rec = { title: $("#tdTitle").value.trim(), body: $("#tdBody").value.trim() || null, due_date: $("#tdDue").value || null };
     if (!rec.title) return alert("Title is required.");
@@ -717,7 +812,7 @@ async function todoDetail(todoId) {
   openModal(`
     <h3>${td.done ? "✔ " : ""}${esc(td.title)}</h3>
     <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">
-      <span class="name-tag">${esc(staffName(td.staff_id))}</span>
+      ${nameTag(td.staff_id)}
       ${td.due_date ? ` DUE ${fmtD(td.due_date)}` : ""} · last F/up ${agoTxt(td.last_fup)}
       ${(td.todo_companies || []).map((c) => ` <span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
     </div>
@@ -918,7 +1013,7 @@ async function afterLogin() {
   if (me.status === "disabled") { authMsg("This account is disabled. Contact the administrator."); await sb.auth.signOut(); return; }
 
   ME = me;
-  const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin").order("part").order("name");
+  const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin,color").order("part").order("name");
   STAFF = all || [];
   const { data: tagRows } = await sb.from("tag_defs").select("*").order("name");
   TAGS = tagRows || [];
@@ -1017,7 +1112,7 @@ async function renderDashboard() {
   const yFrom = `${yr}-01-01`, yTo = `${yr}-12-31`;
   const wkStart = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); })();
   const wkEnd = (() => { const d = new Date(wkStart); d.setDate(d.getDate() + 6); return d.toISOString().slice(0, 10); })();
-  const [compQ, partQ, indivQ, targetQ, halfPartQ, scoreQ, pScoreQ, sTgtQ, wkPlanQ, myTaskQ] = await Promise.all([
+  const [compQ, partQ, indivQ, targetQ, halfPartQ, scoreQ, pScoreQ, sTgtQ, wkPlanQ, myTaskQ, myTodoQ] = await Promise.all([
     sb.rpc("company_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("part_stats", { p_from: r.from, p_to: r.to }),
     sb.rpc("activity_stats", { p_from: r.from, p_to: r.to }),
@@ -1027,7 +1122,8 @@ async function renderDashboard() {
     sb.rpc("part_scores", { p_from: yFrom, p_to: yTo }),
     sb.from("score_targets").select("*").eq("year", yr),
     sb.from("plans").select("*, plan_participants(staff_id)").eq("status", "confirmed").gte("plan_date", wkStart).lte("plan_date", wkEnd).order("plan_date").order("plan_time"),
-    sb.from("tasks").select("*, task_assignees(staff_id)").in("status", ["open", "progress"]).order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("tasks").select("*, task_assignees(staff_id)").eq("status", "progress").order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("todos").select("*").eq("staff_id", ME.id).eq("done", false).order("due_date", { ascending: true, nullsFirst: false }),
   ]);
   if (!$("#dashBody")) return; // view switched while loading
   if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
@@ -1035,9 +1131,9 @@ async function renderDashboard() {
   const targets = targetQ.data || [], halfPart = halfPartQ.data || [];
   const scores = scoreQ.data || [], pScores = pScoreQ.data || [], sTgts = sTgtQ.data || [];
   const myWkPlans = (wkPlanQ.data || []).filter((p) => (p.plan_participants || []).some((x) => x.staff_id === ME.id) || p.created_by === ME.id);
-  const impRank = { high: 0, mid: 1, low: 2 };
   const myTasks = (myTaskQ.data || []).filter((t) => (t.task_assignees || []).some((a) => a.staff_id === ME.id))
-    .sort((a, b) => impRank[a.importance] - impRank[b.importance]).slice(0, 5);
+    .sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, 4);
+  const myTodos = (myTodoQ.data || []).slice(0, 5);
   const types = ["meeting", "vc", "trip", "other"];
 
   // ----- company KPI -----
@@ -1120,13 +1216,20 @@ async function renderDashboard() {
       </div>
       <div>
         <div class="card" style="margin-bottom:16px">
-          <h2 style="font-size:15px;margin-bottom:8px">📌 My tasks</h2>
-          ${myTasks.length ? myTasks.map((t) => {
+          <h2 style="font-size:15px;margin-bottom:8px">✅ My to-dos</h2>
+          ${myTodos.length ? myTodos.map((td) => {
+            const over = td.due_date && td.due_date < new Date().toISOString().slice(0, 10);
+            return `<div data-gotask style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line);display:flex;justify-content:space-between;gap:8px">
+              <span>○ ${esc(td.title)}</span>
+              ${td.due_date ? `<span class="due-chip ${over ? "over" : ""}" style="white-space:nowrap">DUE ${fmtD(td.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}</div>`;
+          }).join("") : `<div style="font-size:12.5px;color:var(--ink-2)">No open to-dos.</div>`}
+          ${myTasks.length ? `<div style="font-size:11px;font-weight:800;color:var(--ink-2);margin-top:10px;letter-spacing:.4px">📌 ASSIGNED TASKS</div>
+          ${myTasks.map((t) => {
             const over = t.due_date && t.due_date < new Date().toISOString().slice(0, 10);
             return `<div data-gotask style="cursor:pointer;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line);display:flex;justify-content:space-between;gap:8px">
-              <span><span class="imp ${t.importance}">${IMP_LABEL[t.importance]}</span> ${esc(t.title)}</span>
+              <span>${t.amount !== null && t.amount !== undefined ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">$${Number(t.amount)}K</span> ` : ""}${esc(t.title)}</span>
               ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}" style="white-space:nowrap">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}</div>`;
-          }).join("") : `<div style="font-size:12.5px;color:var(--ink-2)">No assigned tasks. 🎉 Check the Workboard.</div>`}
+          }).join("")}` : ""}
         </div>
         <div class="card" style="margin-bottom:16px">
           <h2 style="font-size:15px;margin-bottom:8px">📅 My plans this week</h2>
@@ -2044,7 +2147,7 @@ function partModal(edit = null) {
         await sb.from("activities").update({ part: name }).eq("part", edit.name);
         await sb.from("reports").update({ part: name }).eq("part", edit.name);
         await sb.from("targets").update({ part: name }).eq("part", edit.name);
-        const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin").order("part").order("name");
+        const { data: all } = await sb.from("staff").select("id,name,part,role,status,is_admin,color").order("part").order("name");
         STAFF = all || [];
         if (ME.part === edit.name) ME.part = name;
       }
