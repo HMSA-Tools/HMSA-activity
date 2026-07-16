@@ -381,3 +381,229 @@ tr.clickable:hover { background: #f7fafc; cursor: pointer; }
 }
 
 .todo-check.late { color: var(--red); border-radius: 50%; background: #ffe3e3; }
+
+/* =========================================================
+   GLOBAL RIGHT WIDGET: TO-DO + TODAY/TOMORROW ACTIVITIES
+   ========================================================= */
+.global-todo-aside {
+  width: 320px;
+  flex: 0 0 320px;
+  height: calc(100vh - 48px);
+  margin: 24px 28px 24px 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-self: flex-start;
+  overflow: hidden;
+  z-index: 5;
+}
+.global-todo-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex: 0 0 auto;
+}
+.global-todo-head b { font-size: 13.5px; }
+.global-todo-filter {
+  display: block;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  margin-bottom: 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.todo-list-scroll {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+}
+.todo-activity-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 10px 0 9px;
+  flex: 0 0 auto;
+}
+.upcoming-widget {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+.upcoming-widget-title {
+  font-size: 13px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+.upcoming-body {
+  max-height: 225px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+.upcoming-group + .upcoming-group { margin-top: 8px; }
+.upcoming-day {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .45px;
+  color: var(--ink-2);
+  padding: 2px 2px 3px;
+}
+.upcoming-day span {
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.upcoming-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 8px 66px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  border-radius: 7px;
+  padding: 5px 4px;
+  text-align: left;
+  color: var(--ink);
+}
+.upcoming-item:hover { background: #f5f8fa; }
+.upcoming-type-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.upcoming-time {
+  font-size: 10.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.upcoming-title {
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.upcoming-empty {
+  font-size: 11px;
+  color: #98a4af;
+  padding: 3px 4px 5px;
+}
+.upcoming-more,
+.upcoming-calendar-link {
+  border: none;
+  background: transparent;
+  color: var(--green-dark);
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 4px;
+}
+.upcoming-more:hover,
+.upcoming-calendar-link:hover { text-decoration: underline; }
+.upcoming-calendar-link {
+  width: 100%;
+  text-align: right;
+  margin-top: 4px;
+}
+
+/* =========================================================
+   COMPACT DETAIL / FOLLOW-UP COMMENTS
+   ========================================================= */
+.wb-detail-comment {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed #edf1f4;
+  white-space: normal;
+}
+.wb-comment-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.wb-comment-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--ink-2);
+}
+.wb-comment-side {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.wb-comment-meta {
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.wb-comment-check {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+}
+button.wb-comment-check {
+  cursor: pointer;
+}
+.wb-comment-check.pending {
+  border: 1.5px solid var(--amber);
+  background: #fff9e6;
+  color: #b08800;
+}
+.wb-comment-check.pending:hover {
+  background: #fff2c7;
+}
+.wb-comment-check.pending.readonly {
+  cursor: default;
+  opacity: .7;
+}
+.wb-comment-check.handled {
+  border: 1.5px solid #9bd3b4;
+  background: #e8f7ef;
+  color: var(--green-dark);
+}
+.wb-detail-comment.handled .wb-comment-body,
+.wb-detail-comment.handled .wb-comment-meta {
+  color: #bac2c9 !important;
+  opacity: .58;
+}
+.cmt.cmt-handled > div:last-child {
+  color: #bac2c9;
+  opacity: .62;
+}
+
+@media (max-width: 1250px) {
+  .global-todo-aside {
+    width: 280px;
+    flex-basis: 280px;
+    margin-right: 18px;
+  }
+}
+@media (max-width: 900px) {
+  .global-todo-aside {
+    width: auto;
+    flex-basis: auto;
+    height: auto;
+    max-height: none;
+    margin: 0 14px 20px;
+    position: static;
+    overflow: visible;
+  }
+  .todo-list-scroll { max-height: 300px; }
+  .upcoming-body { max-height: 240px; }
+}
