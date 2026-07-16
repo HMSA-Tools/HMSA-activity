@@ -87,6 +87,30 @@
     </aside>
 
     <main class="main" id="main"></main>
+
+    <aside class="todo-aside global-todo-aside" id="globalTodoWidget" style="display:none">
+      <div class="global-todo-head">
+        <b id="todoWidgetTitle">✅ To-dos</b>
+        <button class="btn sm" id="btnNewTodo">+ Mine</button>
+      </div>
+
+      <label class="global-todo-filter">
+        <input type="checkbox" id="bMyTodos" /> Show mine only (incl. tagged to me)
+      </label>
+
+      <div id="todoBody" class="todo-list-scroll">
+        <div class="empty" style="padding:14px 6px">Loading...</div>
+      </div>
+
+      <div class="todo-activity-divider"></div>
+
+      <div class="upcoming-widget">
+        <div class="upcoming-widget-title">📅 My Sales Activities</div>
+        <div id="upcomingBody" class="upcoming-body">
+          <div class="empty" style="padding:12px 6px">Loading...</div>
+        </div>
+      </div>
+    </aside>
   </div>
 </div>
 
