@@ -460,6 +460,10 @@ function planDetailModal(p) {
    ========================================================= */
 var boardPart = null;
 var boardShow = { done: true, canceled: true };
+var boardView = "canvas";      // "canvas" | "list"
+var boardCoFilter = 0;         // 0 = all companies
+var boardShowOldDone = false;  // show done to-dos from previous days
+var boardMyTodos = false;      // "mine only" todo filter
 const TASK_ST = { progress: "In Progress", done: "Done", canceled: "Canceled" };
 const STAFF_PALETTE = ["#2e7cf6", "#00a651", "#f0a020", "#9b59d0", "#e5568c", "#12a5a5", "#e2574c", "#5a6b7d", "#7cb518", "#ff7f50", "#4a6fa5", "#b8860b"];
 const staffColor = (id) => STAFF.find((x) => x.id === id)?.color || "#cfd6dd";
@@ -492,7 +496,15 @@ async function renderBoard() {
     <div class="page-sub">Drag cards anywhere — the layout is shared. Watermark fill shows status: half = in progress, full green = done, gray = canceled. Card color = assignees' colors.</div>
     <div class="filterbar" style="align-items:center">
       <div class="seg">${PARTS.map((p) => `<button data-bpart="${esc(p.name)}" class="${boardPart === p.name ? "active" : ""}">${esc(p.name)}</button>`).join("")}</div>
-      <label style="font-size:12px;margin-left:10px"><input type="checkbox" id="bShowDone" ${boardShow.done ? "checked" : ""}/> Done</label>
+      <div class="seg" style="margin-left:10px">
+        <button id="bvCanvas" class="${boardView === "canvas" ? "active" : ""}">🗂 Canvas</button>
+        <button id="bvList" class="${boardView === "list" ? "active" : ""}">📋 List</button>
+      </div>
+      <select id="bCoFilter" style="max-width:170px">
+        <option value="0">🏢 All companies</option>
+        ${COMPANIES.map((c) => `<option value="${c.id}" ${boardCoFilter == c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
+      </select>
+      <label style="font-size:12px"><input type="checkbox" id="bShowDone" ${boardShow.done ? "checked" : ""}/> Done</label>
       <label style="font-size:12px"><input type="checkbox" id="bShowCx" ${boardShow.canceled ? "checked" : ""}/> Canceled</label>
       ${isManager() ? `<button class="btn ghost sm" id="btnColors" style="margin-left:auto">🎨 Member colors</button>` : `<span style="margin-left:auto"></span>`}
       <button class="btn" id="btnNewTask">+ New task</button>
@@ -500,34 +512,76 @@ async function renderBoard() {
     <div style="display:flex;gap:14px;align-items:flex-start">
       <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>
       <aside class="todo-aside">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
           <b style="font-size:13.5px">✅ To-dos — ${esc(boardPart)}</b>
           ${boardPart === ME.part ? `<button class="btn sm" id="btnNewTodo">+ Mine</button>` : ""}
         </div>
+        <label style="display:block;font-size:11.5px;color:var(--ink-2);margin-bottom:8px;cursor:pointer">
+          <input type="checkbox" id="bMyTodos" ${boardMyTodos ? "checked" : ""}/> Show mine only (incl. tagged to me)</label>
         <div id="todoBody" class="empty" style="padding:10px">Loading...</div>
       </aside>
     </div>`;
   document.querySelectorAll("[data-bpart]").forEach((b) => (b.onclick = () => { boardPart = b.dataset.bpart; renderBoard(); }));
   $("#bShowDone").onchange = (e) => { boardShow.done = e.target.checked; renderBoard(); };
   $("#bShowCx").onchange = (e) => { boardShow.canceled = e.target.checked; renderBoard(); };
+  $("#bvCanvas").onclick = () => { boardView = "canvas"; renderBoard(); };
+  $("#bvList").onclick = () => { boardView = "list"; renderBoard(); };
+  $("#bCoFilter").onchange = (e) => { boardCoFilter = Number(e.target.value); renderBoard(); };
   $("#btnNewTask").onclick = () => taskModal();
   if ($("#btnNewTodo")) $("#btnNewTodo").onclick = () => todoModal();
+  $("#bMyTodos").onchange = (e) => { boardMyTodos = e.target.checked; renderBoard(); };
   if ($("#btnColors")) $("#btnColors").onclick = () => memberColorsModal();
 
-  const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }] = await Promise.all([
+  const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }, { data: tgRaw }] = await Promise.all([
     sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart),
     sb.from("task_comments").select("id,task_id,needs_ack,acked_by"),
-    sb.from("todos").select("*, todo_companies(company_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("todos").select("*, todo_companies(company_id), todo_tags(staff_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
     sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
+    sb.from("todos").select("*, todo_companies(company_id), todo_tags!inner(staff_id)").eq("todo_tags.staff_id", ME.id),
   ]);
   let tasks = tRaw || [];
-  const cmts = cRaw || [], todos = tdRaw || [], tdCmts = tdcRaw || [];
+  const cmts = cRaw || [];
+  const tdCmts = tdcRaw || [];
+  // 파트 투두 + 나를 태그한 투두(타 파트 포함) 병합
+  let todos = tdRaw || [];
+  (tgRaw || []).forEach((t) => { if (!todos.some((x) => x.id === t.id)) todos.push(t); });
+  todos.sort((a, b) => (a.done - b.done) || String(a.due_date || "9999").localeCompare(String(b.due_date || "9999")));
   window.__tasks = tasks; window.__todos = todos;
   if (!$("#boardCanvas")) return;
 
   tasks = tasks.filter((t) => (t.status !== "done" || boardShow.done) && (t.status !== "canceled" || boardShow.canceled));
+  if (boardCoFilter) tasks = tasks.filter((t) => (t.task_companies || []).some((c) => c.company_id === boardCoFilter));
   // 초기 정렬: 금액 큰 순 (위치 미지정 카드의 자동 배치 순서)
   tasks.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0));
+
+  if (boardView === "list") {
+    // ===== 엑셀형 리스트 뷰 =====
+    const stBadge = (t) => `<span class="badge ${t.status === "done" ? "approved" : t.status === "canceled" ? "returned" : "submitted"}">${TASK_ST[t.status]}</span>`;
+    $("#boardCanvas").style.minHeight = "0";
+    $("#boardCanvas").innerHTML = tasks.length ? `<div style="background:#fff;border-radius:12px;overflow:auto">
+      <table><thead><tr><th>Company</th><th>Project / Title</th><th>Detail</th><th>PIC</th><th style="text-align:right">Est. (K$)</th><th>Due</th><th>Status</th><th>Last F/up</th><th>💬</th></tr></thead><tbody>
+      ${tasks.map((t) => {
+        const n = cmts.filter((c) => c.task_id === t.id);
+        const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
+        const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
+        return `<tr class="clickable" data-task="${t.id}" style="${t.status === "canceled" ? "opacity:.5;text-decoration:line-through" : ""}">
+          <td>${(t.task_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ") || "-"}</td>
+          <td style="min-width:200px"><b>${esc(t.title)}</b>
+            ${(t.task_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}</td>
+          <td style="max-width:280px;font-size:12px;color:var(--ink-2)"><div style="white-space:pre-wrap;max-height:72px;overflow:hidden">${esc((t.body || "").slice(0, 180))}${(t.body || "").length > 180 ? "…" : ""}</div></td>
+          <td style="white-space:nowrap">${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || "-"}</td>
+          <td style="text-align:right;font-weight:700">${t.amount !== null && t.amount !== undefined ? Number(t.amount) : ""}</td>
+          <td style="white-space:nowrap" class="${over ? "": ""}">${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : "-"}</td>
+          <td>${stBadge(t)}</td>
+          <td style="white-space:nowrap;font-size:12px;color:var(--ink-2)">${agoTxt(t.last_fup)}</td>
+          <td style="white-space:nowrap">${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}${n.length}</td>
+        </tr>`;
+      }).join("")}
+      </tbody></table></div>` : `<div class="empty" style="padding-top:60px">No tasks match.</div>`;
+    document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
+    drawTodoPanel(todos, tdCmts);
+    return;
+  }
 
   const CW = 250, CH = 165, COLS = 3;
   let autoIdx = 0;
@@ -592,29 +646,48 @@ async function renderBoard() {
     if (error) alert("Position not saved (only people involved in a task can move it): " + error.message);
   });
 
-  // ----- to-do side panel (compact table) -----
+  drawTodoPanel(todos, tdCmts);
+}
+
+function drawTodoPanel(todos, tdCmts) {
   if (!$("#todoBody")) return;
-  $("#todoBody").innerHTML = todos.length ? todos.map((td) => {
+  const today = new Date().toISOString().slice(0, 10);
+  // 완료 투두 자동 숨김: 오늘 완료한 것만 표시, 이전 날 완료분은 토글 켜야 보임
+  const isMineOrTagged = (td) => td.staff_id === ME.id || (td.todo_tags || []).some((t) => t.staff_id === ME.id);
+  if (boardMyTodos) todos = todos.filter(isMineOrTagged);
+  const oldDone = todos.filter((td) => td.done && td.done_at && td.done_at.slice(0, 10) < today);
+  const visible = todos.filter((td) => !(td.done && td.done_at && td.done_at.slice(0, 10) < today) || boardShowOldDone);
+  const daysLate = (td) => {
+    const base = td.due_date || (td.created_at ? td.created_at.slice(0, 10) : null);
+    if (!base || base >= today) return 0;
+    return Math.floor((new Date(today) - new Date(base)) / 86400000);
+  };
+  $("#todoBody").innerHTML = (visible.length ? visible.map((td) => {
     const n = tdCmts.filter((c) => c.todo_id === td.id);
     const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
-    const over = td.due_date && !td.done && td.due_date < new Date().toISOString().slice(0, 10);
+    const late = !td.done ? daysLate(td) : 0;
     return `<div class="todo-row ${td.done ? "tdone" : ""}" data-todo="${td.id}">
-      <span class="todo-check" data-tdchk="${td.id}" title="${td.done ? "Reopen" : "Mark done"}">${td.done ? "✔" : "○"}</span>
+      <span class="todo-check ${late ? "late" : ""}" data-tdchk="${td.id}" title="${td.done ? "Reopen" : late ? "Carried over " + late + " day(s) — mark done" : "Mark done"}">${td.done ? "✔" : "○"}</span>
       <span style="flex:1;min-width:0">
         <div style="font-size:12.5px;font-weight:600;${td.done ? "text-decoration:line-through;color:var(--ink-2)" : ""};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(td.title)}</div>
-        <div style="font-size:10.5px;color:var(--ink-2)">${nameTag(td.staff_id)}${td.due_date ? ` <span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(td.due_date).slice(5)}</span>` : ""}</div>
+        <div style="font-size:10.5px;color:var(--ink-2)">${nameTag(td.staff_id)}${(td.todo_tags || []).filter((t) => t.staff_id !== td.staff_id).map((t) => nameTag(t.staff_id)).join("")}
+          ${td.due_date ? ` <span class="due-chip ${late ? "over" : ""}">DUE ${fmtD(td.due_date).slice(5)}</span>` : ""}
+          ${late ? ` <span style="color:var(--red);font-weight:800">⏰ +${late}d</span>` : ""}</div>
       </span>
       <span style="font-size:10.5px;color:var(--ink-2);white-space:nowrap">${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬${n.length}</span>
     </div>`;
-  }).join("") : `<div style="font-size:12px;color:var(--ink-2)">No to-dos yet.</div>`;
+  }).join("") : `<div style="font-size:12px;color:var(--ink-2)">No to-dos yet.</div>`)
+  + (oldDone.length ? `<label style="display:block;font-size:11px;color:var(--ink-2);margin-top:8px;cursor:pointer">
+      <input type="checkbox" id="bOldDone" ${boardShowOldDone ? "checked" : ""}/> Show ${oldDone.length} done from previous days</label>` : "");
+  if ($("#bOldDone")) $("#bOldDone").onchange = (e) => { boardShowOldDone = e.target.checked; renderBoard(); };
   document.querySelectorAll("[data-todo]").forEach((el) => (el.onclick = (e) => {
     if (e.target.dataset.tdchk) return;
     todoDetail(Number(el.dataset.todo));
   }));
   document.querySelectorAll("[data-tdchk]").forEach((el) => (el.onclick = async () => {
-    const td = todos.find((x) => x.id == el.dataset.tdchk);
+    const td = (window.__todos || []).find((x) => x.id == el.dataset.tdchk);
     if (td.staff_id !== ME.id) return alert("Only the owner can check off a to-do.");
-    await sb.from("todos").update({ done: !td.done }).eq("id", td.id);
+    await sb.from("todos").update({ done: !td.done, done_at: !td.done ? new Date().toISOString() : null }).eq("id", td.id);
     renderBoard();
   }));
 }
@@ -771,6 +844,8 @@ async function taskDetail(taskId) {
 function todoModal(edit = null) {
   const pickedCos = new Set(edit ? (edit.todo_companies || []).map((c) => c.company_id) : []);
   const pickedCts = new Set();
+  const pickedPpl = new Set(edit ? (edit.todo_tags || []).map((t) => t.staff_id).filter((id) => id !== ME.id) : []);
+  const activeStaff = STAFF.filter((x) => x.status === "active" && x.id !== ME.id);
   openModal(`
     <h3>${edit ? "Edit to-do" : "New to-do"}</h3>
     <div class="field"><label>Title</label><input id="tdTitle" value="${esc(edit?.title || "")}" placeholder="e.g. Send Woodward LECM inquiry" /></div>
@@ -780,10 +855,21 @@ function todoModal(edit = null) {
     </div>
     <div class="field"><label>Notes (optional)</label><textarea id="tdBody">${esc(edit?.body || "")}</textarea></div>
     ${tagPanelHTML()}
+    <div class="field"><label>Tag people (optional — appears in their to-do list too)</label>
+      <div class="chips" id="tdPplChips"></div>
+      <select id="tdPplPick"><option value="">+ Tag someone...</option>
+        ${activeStaff.map((x) => `<option value="${x.id}">${esc(x.name)} (${esc(x.part)})</option>`).join("")}</select>
+    </div>
     <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="tdSave">${edit ? "Save" : "Add"}</button></div>`);
   bindTagPanel(pickedCos, pickedCts);
   $("#ctWrap").style.display = "none";
+  const drawPpl = () => {
+    $("#tdPplChips").innerHTML = [...pickedPpl].map((id) => `<span class="chip">${esc(staffName(id))}<button data-rmppl="${id}">×</button></span>`).join("") || `<span style="font-size:12px;color:var(--ink-2)">No one tagged</span>`;
+    document.querySelectorAll("[data-rmppl]").forEach((b) => (b.onclick = () => { pickedPpl.delete(Number(b.dataset.rmppl)); drawPpl(); }));
+  };
+  drawPpl();
+  $("#tdPplPick").onchange = (e) => { if (e.target.value) { pickedPpl.add(Number(e.target.value)); e.target.value = ""; drawPpl(); } };
   $("#tdSave").onclick = async () => {
     const rec = { title: $("#tdTitle").value.trim(), body: $("#tdBody").value.trim() || null, due_date: $("#tdDue").value || null };
     if (!rec.title) return alert("Title is required.");
@@ -799,6 +885,8 @@ function todoModal(edit = null) {
     }
     await sb.from("todo_companies").delete().eq("todo_id", todoId);
     if (pickedCos.size) await sb.from("todo_companies").insert([...pickedCos].map((id) => ({ todo_id: todoId, company_id: id })));
+    await sb.from("todo_tags").delete().eq("todo_id", todoId);
+    if (pickedPpl.size) await sb.from("todo_tags").insert([...pickedPpl].map((sid) => ({ todo_id: todoId, staff_id: sid })));
     closeModal(); renderBoard();
   };
 }
@@ -812,7 +900,7 @@ async function todoDetail(todoId) {
   openModal(`
     <h3>${td.done ? "✔ " : ""}${esc(td.title)}</h3>
     <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:10px">
-      ${nameTag(td.staff_id)}
+      ${nameTag(td.staff_id)}${(td.todo_tags || []).filter((t) => t.staff_id !== td.staff_id).map((t) => nameTag(t.staff_id)).join("")}
       ${td.due_date ? ` DUE ${fmtD(td.due_date)}` : ""} · last F/up ${agoTxt(td.last_fup)}
       ${(td.todo_companies || []).map((c) => ` <span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join("")}
     </div>
@@ -848,7 +936,7 @@ async function todoDetail(todoId) {
     todoDetail(todoId);
   };
   if ($("#tdToggle")) $("#tdToggle").onclick = async () => {
-    await sb.from("todos").update({ done: !td.done }).eq("id", todoId);
+    await sb.from("todos").update({ done: !td.done, done_at: !td.done ? new Date().toISOString() : null }).eq("id", todoId);
     closeModal(); renderBoard();
   };
   if ($("#tdEditBtn")) $("#tdEditBtn").onclick = () => todoModal(td);
@@ -1123,7 +1211,7 @@ async function renderDashboard() {
     sb.from("score_targets").select("*").eq("year", yr),
     sb.from("plans").select("*, plan_participants(staff_id)").eq("status", "confirmed").gte("plan_date", wkStart).lte("plan_date", wkEnd).order("plan_date").order("plan_time"),
     sb.from("tasks").select("*, task_assignees(staff_id)").eq("status", "progress").order("due_date", { ascending: true, nullsFirst: false }),
-    sb.from("todos").select("*").eq("staff_id", ME.id).eq("done", false).order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("todos").select("*, todo_tags(staff_id)").eq("done", false).order("due_date", { ascending: true, nullsFirst: false }),
   ]);
   if (!$("#dashBody")) return; // view switched while loading
   if (compQ.error) { $("#dashBody").innerHTML = `<div class="empty">Failed to load data.</div>`; return; }
@@ -1133,7 +1221,7 @@ async function renderDashboard() {
   const myWkPlans = (wkPlanQ.data || []).filter((p) => (p.plan_participants || []).some((x) => x.staff_id === ME.id) || p.created_by === ME.id);
   const myTasks = (myTaskQ.data || []).filter((t) => (t.task_assignees || []).some((a) => a.staff_id === ME.id))
     .sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0)).slice(0, 4);
-  const myTodos = (myTodoQ.data || []).slice(0, 5);
+  const myTodos = (myTodoQ.data || []).filter((td) => td.staff_id === ME.id || (td.todo_tags || []).some((t) => t.staff_id === ME.id)).slice(0, 5);
   const types = ["meeting", "vc", "trip", "other"];
 
   // ----- company KPI -----
