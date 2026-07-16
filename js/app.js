@@ -78,6 +78,9 @@ let ME = null, STAFF = [], currentView = "dashboard", charts = [], openedReportI
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtD = (d) => (d ? String(d).slice(0, 10) : "-");
+const localYMD = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const addLocalDaysYMD = (days) => { const d = new Date(); d.setDate(d.getDate() + days); return localYMD(d); };
+let rightWidgetLoadSeq = 0;
 const fmtDT = (d) => { const x = new Date(d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")} ${String(x.getHours()).padStart(2, "0")}:${String(x.getMinutes()).padStart(2, "0")}`; };
 const staffName = (id) => STAFF.find((s) => s.id === id)?.name || `#${id}`;
 const idEmail = (id) => `${id.trim().toLowerCase()}@${CONFIG.EMAIL_DOMAIN}`;
@@ -396,7 +399,7 @@ function planModal(edit = null, presetDate = null, fromActivity = null, linkCtx 
       const { error } = await sb.rpc("confirm_plan", { p_plan_id: planId });
       if (error) return alert("Plan saved but confirm failed: " + error.message);
     }
-    closeModal(); renderPlan();
+    closeModal(); renderPlan(); renderRightWidget();
   };
 }
 
@@ -430,7 +433,7 @@ function planDetailModal(p) {
   if ($("#plConfirm")) $("#plConfirm").onclick = async () => {
     const { error } = await sb.rpc("confirm_plan", { p_plan_id: p.id });
     if (error) return alert("Confirm failed: " + error.message);
-    closeModal(); renderPlan();
+    closeModal(); renderPlan(); renderRightWidget();
   };
   if ($("#plReject")) $("#plReject").onclick = () => {
     openModal(`
@@ -444,14 +447,14 @@ function planDetailModal(p) {
       if (error) return alert("Reject failed: " + error.message);
       if (p.task_id) await sb.from("task_comments").insert({ task_id: p.task_id, author_id: ME.id, body: `✖ Plan rejected: ${reason}` });
       if (p.todo_id) await sb.from("todo_comments").insert({ todo_id: p.todo_id, author_id: ME.id, body: `✖ Plan rejected: ${reason}` });
-      closeModal(); renderPlan();
+      closeModal(); renderPlan(); renderRightWidget();
     };
   };
   if ($("#plEdit")) $("#plEdit").onclick = () => planModal(p);
   if ($("#plDel")) $("#plDel").onclick = async () => {
     if (!confirm("Delete this plan?")) return;
     await sb.from("plans").delete().eq("id", p.id);
-    closeModal(); renderPlan();
+    closeModal(); renderPlan(); renderRightWidget();
   };
 }
 
@@ -509,46 +512,29 @@ async function renderBoard() {
       ${isManager() ? `<button class="btn ghost sm" id="btnColors" style="margin-left:auto">🎨 Member colors</button>` : `<span style="margin-left:auto"></span>`}
       <button class="btn" id="btnNewTask">+ New task</button>
     </div>
-    <div class="board-layout">
-      <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>
-      <aside class="todo-aside">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-          <b style="font-size:13.5px">✅ To-dos — ${esc(boardPart)}</b>
-          ${boardPart === ME.part ? `<button class="btn sm" id="btnNewTodo">+ Mine</button>` : ""}
-        </div>
-        <label style="display:block;font-size:11.5px;color:var(--ink-2);margin-bottom:8px;cursor:pointer">
-          <input type="checkbox" id="bMyTodos" ${boardMyTodos ? "checked" : ""}/> Show mine only (incl. tagged to me)</label>
-        <div id="todoBody" class="empty" style="padding:10px">Loading...</div>
-      </aside>
-    </div>`;
-  document.querySelectorAll("[data-bpart]").forEach((b) => (b.onclick = () => { boardPart = b.dataset.bpart; renderBoard(); }));
+    <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>`;
+  document.querySelectorAll("[data-bpart]").forEach((b) => (b.onclick = () => {
+    boardPart = b.dataset.bpart;
+    renderBoard();
+    renderRightWidget();
+  }));
   $("#bShowDone").onchange = (e) => { boardShow.done = e.target.checked; renderBoard(); };
   $("#bShowCx").onchange = (e) => { boardShow.canceled = e.target.checked; renderBoard(); };
   $("#bvCanvas").onclick = () => { boardView = "canvas"; renderBoard(); };
   $("#bvList").onclick = () => { boardView = "list"; renderBoard(); };
   $("#bCoFilter").onchange = (e) => { boardCoFilter = Number(e.target.value); renderBoard(); };
   $("#btnNewTask").onclick = () => taskModal();
-  if ($("#btnNewTodo")) $("#btnNewTodo").onclick = () => todoModal();
-  $("#bMyTodos").onchange = (e) => { boardMyTodos = e.target.checked; renderBoard(); };
   if ($("#btnColors")) $("#btnColors").onclick = () => memberColorsModal();
 
-  const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }, { data: tgRaw }] = await Promise.all([
+  const [{ data: tRaw }, { data: cRaw }] = await Promise.all([
     sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart),
     sb.from("task_comments")
-      .select("id,task_id,body,author_id,created_at,needs_ack,acked_by")
+      .select("id,task_id,body,author_id,created_at,needs_ack,acked_by,acked_at")
       .order("created_at", { ascending: true }),
-    sb.from("todos").select("*, todo_companies(company_id), todo_tags(staff_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
-    sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
-    sb.from("todos").select("*, todo_companies(company_id), todo_tags!inner(staff_id)").eq("todo_tags.staff_id", ME.id),
   ]);
   let tasks = tRaw || [];
   const cmts = cRaw || [];
-  const tdCmts = tdcRaw || [];
-  // 파트 투두 + 나를 태그한 투두(타 파트 포함) 병합
-  let todos = tdRaw || [];
-  (tgRaw || []).forEach((t) => { if (!todos.some((x) => x.id === t.id)) todos.push(t); });
-  todos.sort((a, b) => (a.done - b.done) || String(a.due_date || "9999").localeCompare(String(b.due_date || "9999")));
-  window.__tasks = tasks; window.__todos = todos;
+  window.__tasks = tasks;
   if (!$("#boardCanvas")) return;
 
   tasks = tasks.filter((t) => (t.status !== "done" || boardShow.done) && (t.status !== "canceled" || boardShow.canceled));
@@ -569,12 +555,30 @@ async function renderBoard() {
         const n = cmts.filter((c) => c.task_id === t.id);
         const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
         const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
+        const canHandleComment = t.created_by === ME.id || (t.task_assignees || []).some((a) => a.staff_id === ME.id)
+          || (ME.role === "leader" && t.part === ME.part) || isExec() || ME.is_admin;
         const detailHTML = [
           t.body ? `<div class="wb-detail-main">${esc(t.body)}</div>` : "",
-          ...n.map((c) => `<div class="wb-detail-comment">
-            <div class="wb-detail-comment-meta">${esc(staffName(c.author_id))} · ${fmtD(c.created_at)}</div>
-            <div>${esc(c.body || "")}</div>
-          </div>`)
+          ...n.map((c) => {
+            const handled = Boolean(c.needs_ack && c.acked_by);
+            const pending = Boolean(c.needs_ack && !c.acked_by);
+            const actionMark = handled
+              ? `<span class="wb-comment-check handled" title="Handled by ${esc(staffName(c.acked_by))}">✓</span>`
+              : pending && canHandleComment
+                ? `<button class="wb-comment-check pending" data-list-ack="${c.id}" title="Action needed — mark handled">○</button>`
+                : pending
+                  ? `<span class="wb-comment-check pending readonly" title="Action needed">○</span>`
+                  : "";
+            return `<div class="wb-detail-comment ${handled ? "handled" : ""}">
+              <div class="wb-comment-line">
+                <span class="wb-comment-body">${esc(c.body || "")}</span>
+                <span class="wb-comment-side">
+                  <span class="wb-comment-meta" style="color:${staffColor(c.author_id)}">${esc(staffName(c.author_id))} · ${fmtD(c.created_at).slice(5)}</span>
+                  ${actionMark}
+                </span>
+              </div>
+            </div>`;
+          })
         ].filter(Boolean).join("") || `<span class="wb-detail-empty">-</span>`;
         return `<tr class="clickable" data-task="${t.id}" style="${t.status === "canceled" ? "opacity:.5;text-decoration:line-through" : ""}">
           <td>${(t.task_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ") || "-"}</td>
@@ -591,7 +595,14 @@ async function renderBoard() {
       }).join("")}
       </tbody></table></div>` : `<div class="empty" style="padding-top:60px">No tasks match.</div>`;
     document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
-    drawTodoPanel(todos, tdCmts);
+    document.querySelectorAll("[data-list-ack]").forEach((b) => (b.onclick = async (e) => {
+      e.stopPropagation();
+      const { error } = await sb.from("task_comments")
+        .update({ acked_by: ME.id, acked_at: new Date().toISOString() })
+        .eq("id", Number(b.dataset.listAck));
+      if (error) return alert("Failed: " + error.message);
+      renderBoard();
+    }));
     return;
   }
 
@@ -658,13 +669,71 @@ async function renderBoard() {
     if (error) alert("Position not saved (only people involved in a task can move it): " + error.message);
   });
 
-  drawTodoPanel(todos, tdCmts);
+}
+
+function rightWidgetPart() {
+  return currentView === "board" ? (boardPart || ME.part) : ME.part;
+}
+
+async function renderRightWidget() {
+  const widget = $("#globalTodoWidget");
+  if (!widget || !ME) return;
+
+  const loadSeq = ++rightWidgetLoadSeq;
+  const part = rightWidgetPart();
+  widget.style.display = "flex";
+  $("#todoWidgetTitle").textContent = `✅ To-dos — ${part}`;
+  $("#btnNewTodo").style.display = part === ME.part ? "inline-flex" : "none";
+  $("#bMyTodos").checked = boardMyTodos;
+  $("#todoBody").innerHTML = `<div class="empty" style="padding:14px 6px">Loading...</div>`;
+  $("#upcomingBody").innerHTML = `<div class="empty" style="padding:12px 6px">Loading...</div>`;
+
+  const today = localYMD();
+  const tomorrow = addLocalDaysYMD(1);
+  const [partTodoRes, taggedTodoRes, todoCommentRes, planRes] = await Promise.all([
+    sb.from("todos")
+      .select("*, todo_companies(company_id), todo_tags(staff_id)")
+      .eq("part", part)
+      .order("done")
+      .order("due_date", { ascending: true, nullsFirst: false }),
+    sb.from("todos")
+      .select("*, todo_companies(company_id), todo_tags!inner(staff_id)")
+      .eq("todo_tags.staff_id", ME.id),
+    sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
+    sb.from("plans")
+      .select("*, plan_participants!inner(staff_id), plan_companies(company_id), plan_contracts(contract_id)")
+      .eq("status", "confirmed")
+      .eq("plan_participants.staff_id", ME.id)
+      .lte("plan_date", tomorrow)
+      .or(`plan_date.gte.${today},end_date.gte.${today}`)
+      .order("plan_date", { ascending: true })
+      .order("plan_time", { ascending: true, nullsFirst: false }),
+  ]);
+
+  if (loadSeq !== rightWidgetLoadSeq || !$("#globalTodoWidget")) return;
+
+  if (partTodoRes.error || taggedTodoRes.error || todoCommentRes.error) {
+    console.error("To-do widget load failed", partTodoRes.error, taggedTodoRes.error, todoCommentRes.error);
+    $("#todoBody").innerHTML = `<div style="font-size:12px;color:var(--red);padding:10px 4px">Failed to load to-dos.</div>`;
+  } else {
+    let todos = partTodoRes.data || [];
+    (taggedTodoRes.data || []).forEach((t) => {
+      if (!todos.some((x) => x.id === t.id)) todos.push(t);
+    });
+    todos.sort((a, b) => (Number(a.done) - Number(b.done))
+      || String(a.due_date || "9999").localeCompare(String(b.due_date || "9999")));
+    window.__todos = todos;
+    drawTodoPanel(todos, todoCommentRes.data || []);
+  }
+
+  drawUpcomingActivities(planRes.data || [], planRes.error, today, tomorrow);
+  $("#btnNewTodo").onclick = () => todoModal();
+  $("#bMyTodos").onchange = (e) => { boardMyTodos = e.target.checked; renderRightWidget(); };
 }
 
 function drawTodoPanel(todos, tdCmts) {
   if (!$("#todoBody")) return;
-  const today = new Date().toISOString().slice(0, 10);
-  // 완료 투두 자동 숨김: 오늘 완료한 것만 표시, 이전 날 완료분은 토글 켜야 보임
+  const today = localYMD();
   const isMineOrTagged = (td) => td.staff_id === ME.id || (td.todo_tags || []).some((t) => t.staff_id === ME.id);
   if (boardMyTodos) todos = todos.filter(isMineOrTagged);
   const oldDone = todos.filter((td) => td.done && td.done_at && td.done_at.slice(0, 10) < today);
@@ -672,7 +741,7 @@ function drawTodoPanel(todos, tdCmts) {
   const daysLate = (td) => {
     const base = td.due_date || (td.created_at ? td.created_at.slice(0, 10) : null);
     if (!base || base >= today) return 0;
-    return Math.floor((new Date(today) - new Date(base)) / 86400000);
+    return Math.floor((new Date(`${today}T12:00:00`) - new Date(`${base}T12:00:00`)) / 86400000);
   };
   $("#todoBody").innerHTML = (visible.length ? visible.map((td) => {
     const n = tdCmts.filter((c) => c.todo_id === td.id);
@@ -688,20 +757,78 @@ function drawTodoPanel(todos, tdCmts) {
       </span>
       <span style="font-size:10.5px;color:var(--ink-2);white-space:nowrap">${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬${n.length}</span>
     </div>`;
-  }).join("") : `<div style="font-size:12px;color:var(--ink-2)">No to-dos yet.</div>`)
+  }).join("") : `<div style="font-size:12px;color:var(--ink-2);padding:8px 4px">No to-dos yet.</div>`)
   + (oldDone.length ? `<label style="display:block;font-size:11px;color:var(--ink-2);margin-top:8px;cursor:pointer">
       <input type="checkbox" id="bOldDone" ${boardShowOldDone ? "checked" : ""}/> Show ${oldDone.length} done from previous days</label>` : "");
-  if ($("#bOldDone")) $("#bOldDone").onchange = (e) => { boardShowOldDone = e.target.checked; renderBoard(); };
-  document.querySelectorAll("[data-todo]").forEach((el) => (el.onclick = (e) => {
+  if ($("#bOldDone")) $("#bOldDone").onchange = (e) => { boardShowOldDone = e.target.checked; renderRightWidget(); };
+  document.querySelectorAll("#todoBody [data-todo]").forEach((el) => (el.onclick = (e) => {
     if (e.target.dataset.tdchk) return;
     todoDetail(Number(el.dataset.todo));
   }));
-  document.querySelectorAll("[data-tdchk]").forEach((el) => (el.onclick = async () => {
+  document.querySelectorAll("#todoBody [data-tdchk]").forEach((el) => (el.onclick = async () => {
     const td = (window.__todos || []).find((x) => x.id == el.dataset.tdchk);
+    if (!td) return;
     if (td.staff_id !== ME.id) return alert("Only the owner can check off a to-do.");
-    await sb.from("todos").update({ done: !td.done, done_at: !td.done ? new Date().toISOString() : null }).eq("id", td.id);
-    renderBoard();
+    const { error } = await sb.from("todos")
+      .update({ done: !td.done, done_at: !td.done ? new Date().toISOString() : null })
+      .eq("id", td.id);
+    if (error) return alert("Failed: " + error.message);
+    renderRightWidget();
   }));
+}
+
+function drawUpcomingActivities(plans, error, today, tomorrow) {
+  const body = $("#upcomingBody");
+  if (!body) return;
+  if (error) {
+    console.error("Upcoming activity load failed", error);
+    body.innerHTML = `<div style="font-size:12px;color:var(--red);padding:6px 2px">Failed to load activities.</div>`;
+    return;
+  }
+
+  const occursOn = (p, day) => {
+    if (p.plan_date === day) return true;
+    if (p.a_type !== "trip") return false;
+    return p.plan_date <= day && (p.end_date || p.plan_date) >= day;
+  };
+  const sortPlans = (a, b) => String(a.plan_time || "99:99").localeCompare(String(b.plan_time || "99:99"));
+  const todayPlans = plans.filter((p) => occursOn(p, today)).sort(sortPlans);
+  const tomorrowPlans = plans.filter((p) => occursOn(p, tomorrow)).sort(sortPlans);
+
+  const groupHTML = (label, day, rows) => {
+    const shown = rows.slice(0, 3);
+    return `<div class="upcoming-group">
+      <div class="upcoming-day">${label}<span>${day.slice(5)}</span></div>
+      ${shown.length ? shown.map((p) => `<button class="upcoming-item" data-widget-plan="${p.id}" data-widget-date="${p.plan_date}">
+        <span class="upcoming-type-dot" style="background:${TYPE_COLOR[p.a_type] || TYPE_COLOR.other}"></span>
+        <span class="upcoming-time">${p.plan_time ? fmt12(p.plan_time) : "All day"}</span>
+        <span class="upcoming-title">${esc(p.title)}</span>
+      </button>`).join("") : `<div class="upcoming-empty">No activities</div>`}
+      ${rows.length > 3 ? `<button class="upcoming-more" data-widget-calendar="${day}">+ ${rows.length - 3} more · View Calendar</button>` : ""}
+    </div>`;
+  };
+
+  body.innerHTML = groupHTML("TODAY", today, todayPlans)
+    + groupHTML("TOMORROW", tomorrow, tomorrowPlans)
+    + `<button class="upcoming-calendar-link" data-widget-calendar="${today}">Open Plan Calendar →</button>`;
+
+  body.querySelectorAll("[data-widget-plan]").forEach((b) => (b.onclick = () => {
+    const p = plans.find((x) => x.id == b.dataset.widgetPlan);
+    if (p) openPlanFromWidget(p);
+  }));
+  body.querySelectorAll("[data-widget-calendar]").forEach((b) => (b.onclick = () => openCalendarFromWidget(b.dataset.widgetCalendar)));
+}
+
+async function openCalendarFromWidget(day) {
+  planMonth = new Date(`${day}T12:00:00`);
+  await switchView("plan");
+}
+
+async function openPlanFromWidget(plan) {
+  planMonth = new Date(`${plan.plan_date}T12:00:00`);
+  await switchView("plan");
+  const fresh = (window.__plans || []).find((p) => p.id === plan.id);
+  if (fresh) planDetailModal(fresh);
 }
 
 function memberColorsModal() {
@@ -806,7 +933,7 @@ async function taskDetail(taskId) {
     ${t.body ? `<div class="field"><label>Details</label><div style="white-space:pre-wrap;font-size:13.5px;line-height:1.6">${esc(t.body)}</div></div>` : ""}
     <div class="field"><label>Comments (${comments.length})</label>
       <div style="max-height:260px;overflow-y:auto">
-      ${comments.map((c) => `<div class="cmt">
+      ${comments.map((c) => `<div class="cmt ${c.needs_ack && c.acked_by ? "cmt-handled" : ""}">
         <div class="cmt-meta"><span><b>${esc(staffName(c.author_id))}</b> · ${fmtD(c.created_at.slice(0, 10))} ${fmt12(c.created_at.slice(11, 16))}</span>
         <span>${c.needs_ack ? (c.acked_by ? `<span class="ack-done">✔ Handled by ${esc(staffName(c.acked_by))}</span>` : amInvolved ? `<button class="ack-btn" data-ack="${c.id}">⏳ Action needed — mark handled</button>` : `<span class="ack-btn" style="cursor:default">⏳ Action needed</span>`) : ""}</span></div>
         <div style="white-space:pre-wrap">${esc(c.body)}</div></div>`).join("") || `<div style="font-size:12.5px;color:var(--ink-2)">No comments yet.</div>`}
@@ -899,7 +1026,7 @@ function todoModal(edit = null) {
     if (pickedCos.size) await sb.from("todo_companies").insert([...pickedCos].map((id) => ({ todo_id: todoId, company_id: id })));
     await sb.from("todo_tags").delete().eq("todo_id", todoId);
     if (pickedPpl.size) await sb.from("todo_tags").insert([...pickedPpl].map((sid) => ({ todo_id: todoId, staff_id: sid })));
-    closeModal(); renderBoard();
+    closeModal(); renderRightWidget();
   };
 }
 
@@ -949,13 +1076,13 @@ async function todoDetail(todoId) {
   };
   if ($("#tdToggle")) $("#tdToggle").onclick = async () => {
     await sb.from("todos").update({ done: !td.done, done_at: !td.done ? new Date().toISOString() : null }).eq("id", todoId);
-    closeModal(); renderBoard();
+    closeModal(); renderRightWidget();
   };
   if ($("#tdEditBtn")) $("#tdEditBtn").onclick = () => todoModal(td);
   if ($("#tdDel")) $("#tdDel").onclick = async () => {
     if (!confirm("Delete this to-do?")) return;
     await sb.from("todos").delete().eq("id", todoId);
-    closeModal(); renderBoard();
+    closeModal(); renderRightWidget();
   };
   if ($("#tdPlanBtn")) $("#tdPlanBtn").onclick = () => {
     closeModal(); switchView("plan");
@@ -1158,11 +1285,13 @@ function pwModal() {
 /* =========================================================
    VIEW ROUTER
    ========================================================= */
-function switchView(v) {
+async function switchView(v) {
   currentView = v; openedReportId = null;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   charts.forEach((c) => c.destroy()); charts = [];
-  ({ dashboard: renderDashboard, activities: renderActivities, plan: renderPlan, board: renderBoard, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard)();
+  const renderer = ({ dashboard: renderDashboard, activities: renderActivities, plan: renderPlan, board: renderBoard, reports: renderReports, review: renderReview, admin: renderAdmin }[v] || renderDashboard);
+  await renderer();
+  await renderRightWidget();
 }
 
 /* ---------------- Period helpers ---------------- */
