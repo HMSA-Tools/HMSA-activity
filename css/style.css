@@ -298,3 +298,5 @@ tr.clickable:hover { background: #f7fafc; cursor: pointer; }
 .todo-row.tdone { opacity: .55; }
 .todo-check { font-size: 15px; cursor: pointer; width: 20px; text-align: center; color: var(--green-dark); font-weight: 800; }
 @media (max-width: 1000px) { .todo-aside { width: 240px; } }
+
+.todo-check.late { color: var(--red); border-radius: 50%; background: #ffe3e3; }
