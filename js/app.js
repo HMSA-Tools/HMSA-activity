@@ -509,7 +509,7 @@ async function renderBoard() {
       ${isManager() ? `<button class="btn ghost sm" id="btnColors" style="margin-left:auto">🎨 Member colors</button>` : `<span style="margin-left:auto"></span>`}
       <button class="btn" id="btnNewTask">+ New task</button>
     </div>
-    <div style="display:flex;gap:14px;align-items:flex-start">
+    <div class="board-layout">
       <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>
       <aside class="todo-aside">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -534,7 +534,9 @@ async function renderBoard() {
 
   const [{ data: tRaw }, { data: cRaw }, { data: tdRaw }, { data: tdcRaw }, { data: tgRaw }] = await Promise.all([
     sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart),
-    sb.from("task_comments").select("id,task_id,needs_ack,acked_by"),
+    sb.from("task_comments")
+      .select("id,task_id,body,author_id,created_at,needs_ack,acked_by")
+      .order("created_at", { ascending: true }),
     sb.from("todos").select("*, todo_companies(company_id), todo_tags(staff_id)").eq("part", boardPart).order("done").order("due_date", { ascending: true, nullsFirst: false }),
     sb.from("todo_comments").select("id,todo_id,needs_ack,acked_by"),
     sb.from("todos").select("*, todo_companies(company_id), todo_tags!inner(staff_id)").eq("todo_tags.staff_id", ME.id),
@@ -558,23 +560,33 @@ async function renderBoard() {
     // ===== 엑셀형 리스트 뷰 =====
     const stBadge = (t) => `<span class="badge ${t.status === "done" ? "approved" : t.status === "canceled" ? "returned" : "submitted"}">${TASK_ST[t.status]}</span>`;
     $("#boardCanvas").style.minHeight = "0";
-    $("#boardCanvas").innerHTML = tasks.length ? `<div style="background:#fff;border-radius:12px;overflow:auto">
-      <table><thead><tr><th>Company</th><th>Project / Title</th><th>Detail</th><th>PIC</th><th style="text-align:right">Est. (K$)</th><th>Due</th><th>Status</th><th>Last F/up</th><th>💬</th></tr></thead><tbody>
+    $("#boardCanvas").innerHTML = tasks.length ? `<div class="workboard-table-wrap">
+      <table class="workboard-list-table"><thead><tr>
+        <th>Company</th><th>Project / Title</th><th>PIC</th><th style="text-align:right">Est. (K$)</th>
+        <th>Due</th><th>Status</th><th>Last F/up</th><th>💬</th><th class="wb-detail-head">Detail / Follow-up</th>
+      </tr></thead><tbody>
       ${tasks.map((t) => {
         const n = cmts.filter((c) => c.task_id === t.id);
         const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
         const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
+        const detailHTML = [
+          t.body ? `<div class="wb-detail-main">${esc(t.body)}</div>` : "",
+          ...n.map((c) => `<div class="wb-detail-comment">
+            <div class="wb-detail-comment-meta">${esc(staffName(c.author_id))} · ${fmtD(c.created_at)}</div>
+            <div>${esc(c.body || "")}</div>
+          </div>`)
+        ].filter(Boolean).join("") || `<span class="wb-detail-empty">-</span>`;
         return `<tr class="clickable" data-task="${t.id}" style="${t.status === "canceled" ? "opacity:.5;text-decoration:line-through" : ""}">
           <td>${(t.task_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ") || "-"}</td>
-          <td style="min-width:200px"><b>${esc(t.title)}</b>
+          <td class="wb-title-cell"><b>${esc(t.title)}</b>
             ${(t.task_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}</td>
-          <td style="max-width:280px;font-size:12px;color:var(--ink-2)"><div style="white-space:pre-wrap;max-height:72px;overflow:hidden">${esc((t.body || "").slice(0, 180))}${(t.body || "").length > 180 ? "…" : ""}</div></td>
           <td style="white-space:nowrap">${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || "-"}</td>
           <td style="text-align:right;font-weight:700">${t.amount !== null && t.amount !== undefined ? Number(t.amount) : ""}</td>
-          <td style="white-space:nowrap" class="${over ? "": ""}">${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : "-"}</td>
+          <td style="white-space:nowrap">${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : "-"}</td>
           <td>${stBadge(t)}</td>
           <td style="white-space:nowrap;font-size:12px;color:var(--ink-2)">${agoTxt(t.last_fup)}</td>
           <td style="white-space:nowrap">${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}${n.length}</td>
+          <td class="wb-detail-cell">${detailHTML}</td>
         </tr>`;
       }).join("")}
       </tbody></table></div>` : `<div class="empty" style="padding-top:60px">No tasks match.</div>`;
