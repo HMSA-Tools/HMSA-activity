@@ -684,7 +684,7 @@ function taskModal(edit = null) {
       if (error) return alert("Save failed: " + error.message);
       taskId = edit.id;
     } else {
-      const { data, error } = await sb.from("tasks").insert({ ...rec, part: boardPart === ME.part || isExec() || ME.is_admin ? boardPart : ME.part, created_by: ME.id }).select("id").single();
+      const { data, error } = await sb.from("tasks").insert({ ...rec, status: "progress", part: boardPart === ME.part || isExec() || ME.is_admin ? boardPart : ME.part, created_by: ME.id }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
       taskId = data.id;
     }
