@@ -1726,7 +1726,7 @@ async function renderActivities() {
       <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:4px;max-width:150px;justify-content:flex-end">
         ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button>` : ""}
         ${(mine || reviewer) && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
-        ${reviewer ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
+        ${(mine || ME.is_admin) ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
         ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
       </div></td>
     </tr>`;
@@ -1811,12 +1811,37 @@ async function openMyReportFor(actId) {
 }
 
 function activityModal(edit = null) {
-  const picked = new Set(edit ? (edit.activity_participants || []).filter((p) => p.p_role === "participant").map((p) => p.staff_id) : []);
-  const pickedCos = new Set(edit ? (edit.activity_companies || []).map((c) => c.company_id) : []);
-  const pickedCts = new Set(edit ? (edit.activity_contracts || []).map((c) => c.contract_id) : []);
-  const options = STAFF.filter((s) => s.status === "active" && s.id !== ME.id);
+  const originalHostId = edit
+    ? ((edit.activity_participants || []).find((p) => p.p_role === "host")?.staff_id || edit.created_by)
+    : ME.id;
+
+  const picked = new Set(
+    edit
+      ? (edit.activity_participants || [])
+          .filter((p) => p.p_role === "participant")
+          .map((p) => p.staff_id)
+      : []
+  );
+
+  const pickedCos = new Set(
+    edit ? (edit.activity_companies || []).map((c) => c.company_id) : []
+  );
+
+  const pickedCts = new Set(
+    edit ? (edit.activity_contracts || []).map((c) => c.contract_id) : []
+  );
+
+  // 수정자가 누구든 기존 Host는 참가자 선택 목록에서 제외한다.
+  const options = STAFF.filter(
+    (s) => s.status === "active" && s.id !== originalHostId
+  );
+
+  const participantLabel = edit
+    ? `Add participants (Host remains ${esc(staffName(originalHostId))})`
+    : "Add participants (you are auto-registered as host)";
+
   openModal(`
-    <h3>Edit activity</h3>
+    <h3>${edit ? "Edit activity" : "Create activity"}</h3>
     <div class="row2">
       <div class="field"><label>Type</label><select id="aType">
         ${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
@@ -1830,7 +1855,7 @@ function activityModal(edit = null) {
     <div class="field"><label>Customer PIC (optional, free text)</label><input id="aCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || "")}" placeholder="e.g. Capt. Kim, Mr. Zaidi — anything" /></div>
     <div class="field"><label>Topic / agenda</label><input id="aTitle" value="${esc(edit?.title || "")}" placeholder="e.g. ACONIS server replacement kickoff" /></div>
     <div class="field"><label>Notes (optional)</label><textarea id="aNotes">${esc(edit?.notes || "")}</textarea></div>
-    <div class="field"><label>Add participants (you are auto-registered as host)</label>
+    <div class="field"><label>${participantLabel}</label>
       <select id="aPickP"><option value="">-- Select participant --</option>
         ${options.map((s) => `<option value="${s.id}">${esc(s.name)} (${esc(s.part)})</option>`).join("")}</select>
       <div class="chips" id="aChips"></div>
@@ -1843,42 +1868,141 @@ function activityModal(edit = null) {
   const drawChips = () => {
     $("#aChips").innerHTML = [...picked].map((id) =>
       `<span class="chip">${esc(staffName(id))}<button data-rm="${id}">×</button></span>`).join("");
-    document.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { picked.delete(Number(b.dataset.rm)); drawChips(); }));
+
+    document.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => {
+      picked.delete(Number(b.dataset.rm));
+      drawChips();
+    }));
   };
+
   drawChips();
   bindTagPanel(pickedCos, pickedCts);
-  $("#aPickP").onchange = (e) => { if (e.target.value) { picked.add(Number(e.target.value)); e.target.value = ""; drawChips(); } };
-  $("#aType").onchange = () => { $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none"; };
+
+  $("#aPickP").onchange = (e) => {
+    if (e.target.value) {
+      picked.add(Number(e.target.value));
+      e.target.value = "";
+      drawChips();
+    }
+  };
+
+  $("#aType").onchange = () => {
+    $("#aEndWrap").style.display = $("#aType").value === "trip" ? "block" : "none";
+  };
 
   $("#aSave").onclick = async () => {
+    const saveButton = $("#aSave");
     const isTrip = $("#aType").value === "trip";
-    const rec = { type: $("#aType").value, activity_date: $("#aDate").value,
-      end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
-      customer: $("#aCust").value.trim(), title: $("#aTitle").value.trim(),
-      notes: $("#aNotes").value.trim() || null };
-    if (!rec.title || !rec.activity_date) return alert("Topic and date are required.");
-    if (isTrip && rec.end_date < rec.activity_date) return alert("Trip end date must be on or after the start date.");
 
-    let actId;
-    if (edit && edit.id) {
-      const { error } = await sb.from("activities").update(rec).eq("id", edit.id);
-      if (error) return alert("Save failed: " + error.message);
-      actId = edit.id;
-      await sb.from("activity_participants").delete().eq("activity_id", actId);
-    } else {
-      const { data, error } = await sb.from("activities").insert(rec).select("id").single();
-      if (error) return alert("Create failed: " + error.message);
-      actId = data.id;
+    const rec = {
+      type: $("#aType").value,
+      activity_date: $("#aDate").value,
+      end_date: isTrip ? ($("#aEnd").value || $("#aDate").value) : null,
+      customer: $("#aCust").value.trim(),
+      title: $("#aTitle").value.trim(),
+      notes: $("#aNotes").value.trim() || null,
+    };
+
+    if (!rec.title || !rec.activity_date) {
+      return alert("Topic and date are required.");
     }
-    const partRows = [{ activity_id: actId, staff_id: ME.id, p_role: "host" },
-      ...[...picked].map((id) => ({ activity_id: actId, staff_id: id, p_role: "participant" }))];
-    const { error: e2 } = await sb.from("activity_participants").insert(partRows);
-    if (e2) return alert("Failed to save participants: " + e2.message);
-    await sb.from("activity_companies").delete().eq("activity_id", actId);
-    await sb.from("activity_contracts").delete().eq("activity_id", actId);
-    if (pickedCos.size) await sb.from("activity_companies").insert([...pickedCos].map((id) => ({ activity_id: actId, company_id: id })));
-    if (pickedCts.size) await sb.from("activity_contracts").insert([...pickedCts].map((id) => ({ activity_id: actId, contract_id: id })));
-    closeModal(); renderActivities();
+
+    if (isTrip && rec.end_date < rec.activity_date) {
+      return alert("Trip end date must be on or after the start date.");
+    }
+
+    saveButton.disabled = true;
+    saveButton.textContent = "Saving...";
+
+    try {
+      // 기존 Activity 수정은 DB 함수 한 번으로 처리한다.
+      // Activity, Host/Participants, Company, Contract가 전부 성공하거나 전부 취소된다.
+      if (edit && edit.id) {
+        const { error } = await sb.rpc("update_activity_safe", {
+          p_activity_id: edit.id,
+          p_type: rec.type,
+          p_activity_date: rec.activity_date,
+          p_end_date: rec.end_date,
+          p_customer: rec.customer,
+          p_title: rec.title,
+          p_notes: rec.notes,
+          p_participant_ids: [...picked],
+          p_company_ids: [...pickedCos],
+          p_contract_ids: [...pickedCts],
+        });
+
+        if (error) {
+          alert("Save failed: " + error.message);
+          return;
+        }
+
+        closeModal();
+        renderActivities();
+        return;
+      }
+
+      // 새 Activity 생성 방식은 기존 로직을 유지한다.
+      const { data, error } = await sb
+        .from("activities")
+        .insert(rec)
+        .select("id")
+        .single();
+
+      if (error) {
+        alert("Create failed: " + error.message);
+        return;
+      }
+
+      const actId = data.id;
+      const partRows = [
+        { activity_id: actId, staff_id: ME.id, p_role: "host" },
+        ...[...picked]
+          .filter((id) => id !== ME.id)
+          .map((id) => ({ activity_id: actId, staff_id: id, p_role: "participant" })),
+      ];
+
+      const { error: participantError } = await sb
+        .from("activity_participants")
+        .insert(partRows);
+
+      if (participantError) {
+        alert("Failed to save participants: " + participantError.message);
+        return;
+      }
+
+      await sb.from("activity_companies").delete().eq("activity_id", actId);
+      await sb.from("activity_contracts").delete().eq("activity_id", actId);
+
+      if (pickedCos.size) {
+        const { error: companyError } = await sb
+          .from("activity_companies")
+          .insert([...pickedCos].map((id) => ({ activity_id: actId, company_id: id })));
+
+        if (companyError) {
+          alert("Failed to save companies: " + companyError.message);
+          return;
+        }
+      }
+
+      if (pickedCts.size) {
+        const { error: contractError } = await sb
+          .from("activity_contracts")
+          .insert([...pickedCts].map((id) => ({ activity_id: actId, contract_id: id })));
+
+        if (contractError) {
+          alert("Failed to save contracts: " + contractError.message);
+          return;
+        }
+      }
+
+      closeModal();
+      renderActivities();
+    } finally {
+      if (document.body.contains(saveButton)) {
+        saveButton.disabled = false;
+        saveButton.textContent = edit ? "Save" : "Create";
+      }
+    }
   };
 }
 
