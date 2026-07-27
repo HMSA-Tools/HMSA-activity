@@ -23,6 +23,7 @@ const PART_PALETTE = ["#00a651", "#2e7cf6", "#f0a020", "#9b59d0", "#e5568c", "#1
 const partColor = (name) => PARTS.find((p) => p.name === name)?.color || "#5a6b7d";
 const partBadge = (name) => { const c = partColor(name); return `<span class="badge" style="background:${c}1c;color:${c};border:1px solid ${c}44">${esc(name)}</span>`; };
 let repTagFilter = 0; // 0 = all
+let showVoidedReports = false; // duplicates are hidden by default
 let searchQ = { act: "", rep: "", rev: "" };
 let coFilter = { act: 0, rep: 0, rev: 0 }; // 0 = all companies
 function searchBarHTML(key) {
@@ -1801,7 +1802,7 @@ async function renderDashboard() {
   // ----- review widget data -----
   let reviewHTML = "";
   if (isManager()) {
-    const { data: subs } = await sb.from("reports").select("id,title,part,updated_at,author_id").eq("status", "submitted").order("updated_at");
+    const { data: subs } = await sb.from("reports").select("id,title,part,updated_at,author_id").eq("status", "submitted").eq("is_voided", false).order("updated_at");
     const list = subs || [];
     const oldest = list.length ? Math.floor((Date.now() - new Date(list[0].updated_at)) / 86400000) : 0;
     reviewHTML = `
@@ -1810,7 +1811,7 @@ async function renderDashboard() {
         📄 ${esc(x.title)} ${partBadge(x.part)} <span style="color:var(--ink-2)">${esc(staffName(x.author_id))}</span></div>`).join("")}
       ${list.length > 3 ? `<div style="font-size:11.5px;color:var(--ink-2);margin-top:4px">+${list.length - 3} more in Review Inbox</div>` : ""}`;
   } else {
-    const { data: mine } = await sb.from("reports").select("status").eq("author_id", ME.id);
+    const { data: mine } = await sb.from("reports").select("status").eq("author_id", ME.id).eq("is_voided", false);
     const cnt = { draft: 0, submitted: 0, returned: 0, approved: 0 };
     (mine || []).forEach((x) => cnt[x.status]++);
     reviewHTML = `<div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -2074,7 +2075,7 @@ async function renderActivities() {
   const ids = acts.map((a) => a.id);
   let linked = [];
   if (ids.length) {
-    const { data: lr } = await sb.from("reports").select("id,activity_id,author_id,status").in("activity_id", ids);
+    const { data: lr } = await sb.from("reports").select("id,activity_id,author_id,status").in("activity_id", ids).eq("is_voided", false);
     linked = lr || [];
   }
   window.__actLinked = linked; window.__acts = acts;
@@ -2208,7 +2209,7 @@ function reportStatusModal(actId) {
 }
 
 async function openMyReportFor(actId) {
-  const { data: existing } = await sb.from("reports").select("id").eq("activity_id", actId).eq("author_id", ME.id).maybeSingle();
+  const { data: existing } = await sb.from("reports").select("id").eq("activity_id", actId).eq("author_id", ME.id).eq("is_voided", false).maybeSingle();
   if (existing) return openReport(existing.id);
   const a = window.__acts.find((x) => x.id === actId);
   reportModal(null, a); // prefilled from activity
@@ -2416,11 +2417,12 @@ function activityModal(edit = null) {
 async function renderReports() {
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Reports</div>
-    <div class="page-sub">Counsel & internal reports. Submitting is one step — write and it goes straight to your part leader. Everyone can read final reports; edit history is visible to reviewers.</div>
+    <div class="page-sub">Customer Meeting reports must be linked to an Activity. Internal reports can still be written directly. Duplicate reports are hidden from normal lists and approvals.</div>
     ${searchBarHTML("rep")}
     ${filterRowHTML("rep")}
-    <div class="section-head"><h2>Report list</h2><div style="display:flex;gap:8px">
+    <div class="section-head"><h2>Report list</h2><div style="display:flex;gap:8px;flex-wrap:wrap">
       ${isManager() ? `<button class="btn ghost" id="btnTags">🏷️ Tags</button><button class="btn ghost" id="btnCompanies2">🏢 Companies</button>` : ""}
+      <button class="btn ghost" id="btnShowDuplicates">${showVoidedReports ? "Hide duplicates" : "Show duplicates"}</button>
       <button class="btn" id="btnNewRep">+ New report</button></div></div>
     <div class="card" style="padding:8px 14px" id="repList"><div class="empty">Loading...</div></div>`;
   bindSearchBar("rep", renderReports);
@@ -2428,7 +2430,8 @@ async function renderReports() {
   $("#rf_rtype").onchange = (e) => { repFilter.rtype = e.target.value; renderReports(); };
   $("#rf_part").onchange = (e) => { repFilter.part = e.target.value; renderReports(); };
   $("#rf_tag").onchange = (e) => { repTagFilter = Number(e.target.value); renderReports(); };
-  $("#btnNewRep").onclick = () => reportModal();
+  $("#btnNewRep").onclick = newReportStartModal;
+  $("#btnShowDuplicates").onclick = () => { showVoidedReports = !showVoidedReports; renderReports(); };
   if ($("#btnCompanies2")) $("#btnCompanies2").onclick = companiesModal;
   if ($("#btnTags")) $("#btnTags").onclick = tagsModal;
   await drawReportList("#repList");
@@ -2437,8 +2440,16 @@ async function renderReports() {
 async function drawReportList(sel, onlySubmitted = false) {
   const key = onlySubmitted ? "rev" : "rep";
   let q = sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").order("updated_at", { ascending: false });
-  if (onlySubmitted) q = q.eq("status", "submitted");
-  const { data } = await q;
+  if (onlySubmitted) q = q.eq("status", "submitted").eq("is_voided", false);
+  else if (!showVoidedReports) q = q.eq("is_voided", false);
+
+  const { data, error } = await q;
+  if (error) {
+    const listEl = $(sel);
+    if (listEl) listEl.innerHTML = `<div class="empty">Report loading failed: ${esc(error.message)}</div>`;
+    return;
+  }
+
   let reps = data || [];
   if (!onlySubmitted && repTagFilter) reps = reps.filter((r) => (r.report_tags || []).some((t) => t.tag_id === repTagFilter));
   if (!onlySubmitted) {
@@ -2454,11 +2465,13 @@ async function drawReportList(sel, onlySubmitted = false) {
     richTextToPlain(r.content),
     richTextToPlain(r.followup),
     staffName(r.author_id),
+    r.void_reason,
     (r.report_companies || []).map((c) => companyName(c.company_id)).join(" ")
   ));
+
   const tagName = (id) => TAGS.find((t) => t.id === id)?.name || "";
   const rows = reps.map((r) => `
-    <tr class="clickable" data-open="${r.id}">
+    <tr class="clickable" data-open="${r.id}" style="${r.is_voided ? "opacity:.62;background:#fafafa" : ""}">
       <td style="white-space:nowrap">${fmtD(r.meeting_date)}</td>
       <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:3px">
         <span class="badge part">${RTYPE_LABEL[r.report_type] || "Customer Meeting"}</span>
@@ -2467,13 +2480,17 @@ async function drawReportList(sel, onlySubmitted = false) {
         ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join("")}
       </div></td>
       <td style="vertical-align:top">${reportPicSummary(r) ? `<b>${esc(reportPicSummary(r))}</b>` : `<span style="color:var(--ink-2)">-</span>`}</td>
-      <td>${esc(r.title)}</td>
+      <td>${esc(r.title)}
+        ${r.activity_id ? `<div style="font-size:11px;color:var(--green-dark)">🔗 Activity linked</div>` : ""}
+        ${r.is_voided ? `<div style="font-size:11px;color:var(--red)">Duplicate${r.duplicate_of_report_id ? ` of #${r.duplicate_of_report_id}` : ""}</div>` : ""}
+      </td>
       <td>${esc(staffName(r.author_id))} ${partBadge(r.part)}</td>
       <td>v${r.version}</td>
-      <td><span class="badge ${r.status}">${ST_LABEL[r.status]}</span></td>
+      <td>${r.is_voided ? `<span class="badge returned">Duplicate</span>` : `<span class="badge ${r.status}">${ST_LABEL[r.status]}</span>`}</td>
     </tr>`).join("");
+
   const listEl = $(sel);
-  if (!listEl) return; // view switched while loading
+  if (!listEl) return;
   listEl.innerHTML = rows
     ? `<table><thead><tr><th>Date</th><th>Type / Tags</th><th>Counterpart</th><th>Title</th><th>Author</th><th>Ver.</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`
     : `<div class="empty">${onlySubmitted ? "No reports awaiting review." : "No reports match. Write your first one!"}</div>`;
@@ -2509,7 +2526,96 @@ async function tagsModal() {
   };
 }
 
-function reportModal(edit = null, fromActivity = null) {
+
+async function newReportStartModal() {
+  const { data: actsRaw, error: activityError } = await sb.from("activities")
+    .select("*, activity_participants(staff_id,p_role), activity_companies(company_id), activity_contracts(contract_id)")
+    .neq("status", "canceled")
+    .order("activity_date", { ascending: false })
+    .limit(250);
+
+  if (activityError) return alert("Could not load Activities: " + activityError.message);
+
+  const activities = (actsRaw || []).filter((a) =>
+    a.created_by === ME.id || (a.activity_participants || []).some((p) => p.staff_id === ME.id)
+  );
+
+  const ids = activities.map((a) => a.id);
+  const existingByActivity = new Map();
+  if (ids.length) {
+    const { data: existing, error: reportError } = await sb.from("reports")
+      .select("id,activity_id,status")
+      .eq("author_id", ME.id)
+      .eq("is_voided", false)
+      .in("activity_id", ids);
+    if (reportError) return alert("Could not check existing reports: " + reportError.message);
+    (existing || []).forEach((r) => existingByActivity.set(r.activity_id, r));
+  }
+
+  openModal(`
+    <h3>New report</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:14px">
+      Customer Meeting reports must be connected to an Activity. This prevents the same person from submitting the same meeting report twice.
+    </p>
+    <div class="field">
+      <label>Report type</label>
+      <select id="newRepType">
+        <option value="customer">Customer Meeting</option>
+        <option value="internal">Internal</option>
+      </select>
+    </div>
+    <div class="field" id="newRepActivityWrap">
+      <label>Related Activity</label>
+      <select id="newRepActivity">
+        <option value="">-- Select Activity --</option>
+        ${activities.map((a) => {
+          const existing = existingByActivity.get(a.id);
+          const companyText = (a.activity_companies || []).map((c) => companyName(c.company_id)).filter(Boolean).join(", ");
+          return `<option value="${a.id}">${fmtD(a.activity_date)} · ${esc(a.title)}${companyText ? ` · ${esc(companyText)}` : ""}${existing ? ` · REPORT EXISTS (${ST_LABEL[existing.status] || existing.status})` : ""}</option>`;
+        }).join("")}
+      </select>
+      <div style="font-size:11.5px;color:var(--ink-2);margin-top:5px">
+        Only Activities where you are the host or a participant are shown.
+      </div>
+      ${activities.length ? "" : `<div style="font-size:12px;color:var(--red);margin-top:8px">No available Activity was found. Create or confirm the Activity first.</div>`}
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="newRepContinue">Continue</button>
+    </div>`);
+
+  const syncType = () => {
+    $("#newRepActivityWrap").style.display = $("#newRepType").value === "customer" ? "block" : "none";
+  };
+  $("#newRepType").onchange = syncType;
+  syncType();
+
+  $("#newRepContinue").onclick = () => {
+    const type = $("#newRepType").value;
+    if (type === "internal") {
+      closeModal();
+      reportModal(null, null, "internal");
+      return;
+    }
+
+    const activityId = Number($("#newRepActivity").value);
+    if (!activityId) return alert("Select the related Activity.");
+
+    const existing = existingByActivity.get(activityId);
+    if (existing) {
+      closeModal();
+      alert("You already have a report for this Activity. The existing report will open instead.");
+      openReport(existing.id);
+      return;
+    }
+
+    const activity = activities.find((a) => a.id === activityId);
+    closeModal();
+    reportModal(null, activity, "customer");
+  };
+}
+
+function reportModal(edit = null, fromActivity = null, presetType = null) {
   const pickedTags = new Set(edit ? (edit.report_tags || []).map((t) => t.tag_id) : []);
   const pickedCos = new Set(edit ? (edit.report_companies || []).map((c) => c.company_id)
     : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : []);
@@ -2526,7 +2632,7 @@ function reportModal(edit = null, fromActivity = null) {
     <h3>${edit ? `Edit report (v${edit.version})` : fromActivity ? `Report for: ${esc(fromActivity.title)}` : "New report"}</h3>
     <div class="row2">
       <div class="field"><label>Report type</label><select id="rType">
-        ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.report_type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
+        ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${(edit?.report_type || presetType || (fromActivity ? "customer" : "customer")) === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
       <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || fromActivity?.activity_date || localYMD()}" /></div>
     </div>
     ${TAGS.length ? `<div class="field"><label>Tags (optional, multiple)</label>
@@ -2609,6 +2715,9 @@ function reportModal(edit = null, fromActivity = null) {
     };
 
     if (!rec.title) return alert("Title is required.");
+    if (!edit && !fromActivity && rec.report_type === "customer") {
+      return alert("Customer Meeting reports must be created by selecting a related Activity from the Reports tab, or by using My report in Activities.");
+    }
 
     const saveButton = $("#rSave");
     saveButton.disabled = true;
@@ -2632,7 +2741,12 @@ function reportModal(edit = null, fromActivity = null) {
           part: ME.part,
           activity_id: fromActivity?.id || null,
         }).select("id").single();
-        if (error) return alert("Save failed: " + error.message);
+        if (error) {
+          if (error.code === "23505" || String(error.message || "").includes("reports_one_active_per_activity_author")) {
+            return alert("A report already exists for this Activity under your name. Open the existing report from Activities instead.");
+          }
+          return alert("Save failed: " + error.message);
+        }
         repId = data.id;
         if (fromActivity?.plan_id) {
           const { data: pl } = await sb.from("plans").select("task_id,todo_id").eq("id", fromActivity.plan_id).maybeSingle();
@@ -2689,6 +2803,96 @@ function diffWords(oldStr, newStr) {
   return out.join("");
 }
 
+
+async function reportDuplicateModal(report) {
+  const { data: candidatesRaw, error } = await sb.from("reports")
+    .select("id,title,meeting_date,activity_id,status,author_id")
+    .eq("author_id", report.author_id)
+    .eq("is_voided", false)
+    .neq("id", report.id)
+    .order("updated_at", { ascending: false });
+
+  if (error) return alert("Could not load possible matching reports: " + error.message);
+
+  const candidates = (candidatesRaw || []).sort((a, b) => {
+    const aScore = (a.activity_id ? 100 : 0) + (a.meeting_date === report.meeting_date ? 20 : 0) + (a.title === report.title ? 10 : 0);
+    const bScore = (b.activity_id ? 100 : 0) + (b.meeting_date === report.meeting_date ? 20 : 0) + (b.title === report.title ? 10 : 0);
+    return bScore - aScore;
+  });
+
+  openModal(`
+    <h3>Mark report as duplicate</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">
+      The report is not permanently deleted. It will be hidden from normal lists, approval queues, Activity report counts, and dashboard totals. Its history remains available.
+    </p>
+    <div class="field">
+      <label>Keep this report instead</label>
+      <select id="dupTarget">
+        <option value="">-- Select the correct report --</option>
+        ${candidates.map((x) => `<option value="${x.id}">${x.activity_id ? "🔗 Activity-linked · " : ""}${fmtD(x.meeting_date)} · #${x.id} · ${esc(x.title)} · ${ST_LABEL[x.status] || x.status}</option>`).join("")}
+      </select>
+      ${candidates.length ? "" : `<div style="font-size:12px;color:var(--red);margin-top:6px">No other report by this author is available. Create or locate the correct report first.</div>`}
+    </div>
+    <div class="field">
+      <label>Reason</label>
+      <textarea id="dupReason" style="min-height:95px">Created separately in the Reports tab before the Activity-linked report was submitted.</textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn danger" id="dupConfirm" ${candidates.length ? "" : "disabled"}>Mark as duplicate</button>
+    </div>`);
+
+  if (!candidates.length) return;
+
+  $("#dupConfirm").onclick = async () => {
+    const duplicateOf = Number($("#dupTarget").value);
+    const reason = $("#dupReason").value.trim();
+    if (!duplicateOf) return alert("Select the correct report to keep.");
+    if (!reason) return alert("Enter a reason.");
+    if (!confirm("Hide this report as a duplicate? The correct report will remain active.")) return;
+
+    const button = $("#dupConfirm");
+    button.disabled = true;
+    button.textContent = "Saving...";
+
+    const now = new Date().toISOString();
+    const { error: updateError } = await sb.from("reports").update({
+      is_voided: true,
+      void_reason: reason,
+      duplicate_of_report_id: duplicateOf,
+      voided_by: ME.id,
+      voided_at: now,
+      updated_at: now,
+    }).eq("id", report.id);
+
+    if (updateError) {
+      button.disabled = false;
+      button.textContent = "Mark as duplicate";
+      return alert("Could not mark the report as duplicate: " + updateError.message);
+    }
+
+    await logEvent(report.id, "comment", `Marked as duplicate of report #${duplicateOf}. ${reason}`, report.version, report.content, report.followup);
+    closeModal();
+    openReport(report.id);
+  };
+}
+
+async function restoreDuplicateReport(report) {
+  if (!confirm("Restore this duplicate report to the normal report list?")) return;
+  const now = new Date().toISOString();
+  const { error } = await sb.from("reports").update({
+    is_voided: false,
+    void_reason: null,
+    duplicate_of_report_id: null,
+    voided_by: null,
+    voided_at: null,
+    updated_at: now,
+  }).eq("id", report.id);
+  if (error) return alert("Restore failed: " + error.message);
+  await logEvent(report.id, "comment", "Duplicate marking was restored.", report.version, report.content, report.followup);
+  openReport(report.id);
+}
+
 async function openReport(id) {
   const { data: r } = await sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").eq("id", id).single();
   if (!r) return alert("Can't open this report (no permission).");
@@ -2697,10 +2901,13 @@ async function openReport(id) {
   const { data: events } = await sb.from("report_events").select("*").eq("report_id", id).order("created_at", { ascending: false });
 
   const isAuthor = r.author_id === ME.id;
-  const canReview = (ME.role === "leader" && ME.part === r.part && !isAuthor) || isExec() || ME.is_admin;
-  const canEdit = (isAuthor && (r.status === "submitted" || r.status === "returned")) || (canReview && (r.status === "submitted" || r.status === "returned"));
-  const canRevoke = (isExec() || ME.is_admin) && r.status === "approved";
+  const isVoided = r.is_voided === true;
+  const canReview = !isVoided && ((ME.role === "leader" && ME.part === r.part && !isAuthor) || isExec() || ME.is_admin);
+  const canEdit = !isVoided && ((isAuthor && (r.status === "submitted" || r.status === "returned")) || (canReview && (r.status === "submitted" || r.status === "returned")));
+  const canRevoke = !isVoided && (isExec() || ME.is_admin) && r.status === "approved";
   const canSeeHistory = isAuthor || (ME.role === "leader" && ME.part === r.part) || isExec() || ME.is_admin;
+  const canMarkDuplicate = !isVoided && ((isAuthor && ["draft", "submitted", "returned"].includes(r.status)) || isManager() || ME.is_admin);
+  const canRestoreDuplicate = isVoided && (isAuthor || isManager() || ME.is_admin);
   const evLabel = { create: "created", edit: "edited", submit: "submitted", return: "returned", approve: "approved", comment: "commented", revoke: "revoked approval" };
   const dotCls = { submit: "submit", return: "return", approve: "approve", revoke: "return" };
 
@@ -2733,14 +2940,19 @@ async function openReport(id) {
       ${(r.report_companies || []).map((c) => `<span class="badge meeting">${esc(companyName(c.company_id))}</span>`).join(" ")}
       ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join(" ")}
       ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(TAGS.find((x) => x.id === t.tag_id)?.name || "")}</span>`).join(" ")}
-      <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
+      ${isVoided ? `<span class="badge returned">Duplicate</span>` : `<span class="badge ${r.status}">${ST_LABEL[r.status]}</span>`}
       <span class="badge part">v${r.version}</span>
     </div>
-    <div class="page-sub">${reportPics.length ? `${reportPics.length} Customer PIC${reportPics.length > 1 ? "s" : ""} · ` : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})${r.activity_id ? " · 🔗 linked to activity" : ""}</div>
+    <div class="page-sub">${reportPics.length ? `${reportPics.length} Customer PIC${reportPics.length > 1 ? "s" : ""} · ` : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})${r.activity_id ? " · 🔗 linked to activity" : ""}${isVoided ? " · hidden as duplicate" : ""}</div>
 
     <div class="two-col">
       <div>
         <div class="card" style="margin-bottom:14px">
+          ${isVoided ? `<div style="margin-bottom:14px;padding:12px;border:1.5px solid #f0c5c5;background:#fff5f5;border-radius:9px">
+            <div style="font-weight:800;color:var(--red);margin-bottom:4px">Duplicate report — excluded from normal lists and approvals</div>
+            <div style="font-size:12.5px;line-height:1.5;color:var(--ink-2)">${esc(r.void_reason || "Marked as duplicate.")}</div>
+            ${r.duplicate_of_report_id ? `<div style="font-size:12px;margin-top:5px">Correct report: <b>#${r.duplicate_of_report_id}</b></div>` : ""}
+          </div>` : ""}
           ${reportPicsDisplayHTML(r)}
           <h2 style="font-size:14px;margin-bottom:8px">Discussion</h2>
           <div class="report-content rich-report-output">${renderRichContent(r.content)}</div>
@@ -2754,6 +2966,9 @@ async function openReport(id) {
           ${canReview && r.status === "submitted" ? `
             <button class="btn danger" id="repReturn">↩️ Return (with reason)</button>` : ""}
           ${canRevoke ? `<button class="btn danger" id="repRevoke">🚫 Revoke approval (with remark)</button>` : ""}
+          ${canMarkDuplicate ? `<button class="btn danger" id="repDuplicate">Mark as duplicate</button>` : ""}
+          ${isVoided && r.duplicate_of_report_id ? `<button class="btn ghost" id="repOpenCorrect">Open correct report #${r.duplicate_of_report_id}</button>` : ""}
+          ${canRestoreDuplicate ? `<button class="btn ghost" id="repRestoreDuplicate">Restore duplicate</button>` : ""}
 
         </div>
       </div>
@@ -2781,6 +2996,9 @@ async function openReport(id) {
 
   $("#backBtn").onclick = () => switchView(currentView === "review" ? "review" : "reports");
   if ($("#repEdit")) $("#repEdit").onclick = () => reportModal(r);
+  if ($("#repDuplicate")) $("#repDuplicate").onclick = () => reportDuplicateModal(r);
+  if ($("#repOpenCorrect")) $("#repOpenCorrect").onclick = () => openReport(Number(r.duplicate_of_report_id));
+  if ($("#repRestoreDuplicate")) $("#repRestoreDuplicate").onclick = () => restoreDuplicateReport(r);
   if ($("#repApprove")) $("#repApprove").onclick = async () => {
     if (!confirm("Approve this report?")) return;
     await sb.from("reports").update({ status: "approved", updated_at: new Date().toISOString() }).eq("id", r.id);
