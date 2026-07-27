@@ -475,6 +475,7 @@ async function planDetailModal(p) {
       ${canManage && p.status === "confirmed" && !p.is_canceled ? `<button class="btn ghost" id="plCancel" style="color:var(--amber)">Cancel</button><button class="btn ghost" id="plReschedule">Reschedule</button>` : ""}
       ${canManage && p.status === "confirmed" && p.is_canceled ? `<button class="btn" id="plReschedule">Reschedule & reactivate</button>` : ""}
       ${canManage && p.status === "confirmed" && !p.is_canceled && !linkedActivity ? `<button class="btn" id="plRestore">Restore Activity</button>` : ""}
+      ${canManage && p.status === "confirmed" ? `<button class="btn danger" id="plHardDelete">Delete permanently</button>` : ""}
       ${canDecide ? `<button class="btn danger" id="plReject">✖ Reject</button><button class="btn" id="plConfirm">✅ Accept${p.multiplier === 2 ? " (×2)" : " (1x)"}</button>` : ""}
       <button class="btn ${canDecide ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
@@ -522,6 +523,37 @@ async function planDetailModal(p) {
     }
     alert("Activity restored from this Plan.");
     closeModal(); renderPlan(); renderRightWidget();
+  };
+
+  if ($("#plHardDelete")) $("#plHardDelete").onclick = async () => {
+    const first = confirm(
+      "Permanently delete this Plan and its linked Activity?\n\nThis cannot be undone."
+    );
+    if (!first) return;
+
+    const second = confirm(
+      `Final confirmation: permanently delete "${p.title}"?`
+    );
+    if (!second) return;
+
+    const button = $("#plHardDelete");
+    button.disabled = true;
+    button.textContent = "Deleting...";
+
+    const { error } = await sb.rpc("delete_plan_activity", {
+      p_plan_id: p.id,
+    });
+
+    if (error) {
+      button.disabled = false;
+      button.textContent = "Delete permanently";
+      return alert("Delete failed: " + error.message);
+    }
+
+    alert("Plan and linked Activity were permanently deleted.");
+    closeModal();
+    renderPlan();
+    renderRightWidget();
   };
 
   if ($("#plCancel")) $("#plCancel").onclick = () => cancelPlanActivityModal(p);
