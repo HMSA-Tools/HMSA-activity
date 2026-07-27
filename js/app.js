@@ -259,7 +259,7 @@ async function renderPlan() {
 
   // leader/exec: pending confirmation strip
   if (isManager()) {
-    const pend = plans.filter((p) => p.status === "pending" && (ME.role !== "leader" || p.part === ME.part));
+    const pend = plans.filter((p) => !p.is_canceled && p.status === "pending" && (ME.role !== "leader" || p.part === ME.part));
     if (pend.length) {
       $("#plPendingWrap").innerHTML = `<div class="card" style="margin-bottom:12px;border-left:4px solid var(--amber)">
         <b style="font-size:13.5px">⏳ ${pend.length} plan(s) awaiting your confirmation</b>
@@ -278,7 +278,11 @@ async function renderPlan() {
     const dayPlans = plans.filter((p) => p.plan_date === ds);
     cells += `<div class="plan-cell ${ds === todayStr ? "today" : ""}" data-plday="${ds}">
       <div class="plan-day">${d}</div>
-      ${dayPlans.map((p) => `<span class="plan-chip ${p.status}" data-plopen="${p.id}" style="border-left-color:${partColor(p.part)}" title="${esc(p.title)}">${p.status === "pending" ? "⏳ " : ""}${p.plan_time ? fmtT(p.plan_time) + " " : ""}${esc(p.title)}</span>`).join("")}
+      ${dayPlans.map((p) => {
+        const visualStatus = p.is_canceled ? "canceled" : p.status;
+        const prefix = p.is_canceled ? "✖ " : p.status === "pending" ? "⏳ " : "";
+        return `<span class="plan-chip ${visualStatus}" data-plopen="${p.id}" style="border-left-color:${partColor(p.part)}" title="${esc(p.title)}">${prefix}${p.plan_time ? fmtT(p.plan_time) + " " : ""}${esc(p.title)}</span>`;
+      }).join("")}
     </div>`;
   }
   $("#plGrid").innerHTML = cells;
@@ -403,38 +407,84 @@ function planModal(edit = null, presetDate = null, fromActivity = null, linkCtx 
   };
 }
 
-function planDetailModal(p) {
+async function planDetailModal(p) {
   if (!p) return;
-  const canDecide = p.status === "pending" && ((ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin);
-  const canEdit = (p.created_by === ME.id && p.status !== "confirmed") || (ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin;
-  const stBadge = p.status === "confirmed" ? `<span class="badge approved">Confirmed</span>`
-    : p.status === "rejected" ? `<span class="badge returned">Rejected</span>`
-    : `<span class="badge pending">Pending confirmation</span>`;
+
+  const { data: linkedActivity, error: linkedError } = await sb
+    .from("activities")
+    .select("id,status,activity_date")
+    .eq("plan_id", p.id)
+    .maybeSingle();
+
+  if (linkedError) {
+    console.error("Linked Activity lookup failed", linkedError);
+  }
+
+  const canDecide = !p.is_canceled && p.status === "pending"
+    && ((ME.role === "leader" && p.part === ME.part) || isExec() || ME.is_admin);
+  const canManage = p.created_by === ME.id
+    || (ME.role === "leader" && p.part === ME.part)
+    || isExec()
+    || ME.is_admin;
+  const canEditDraft = canManage && p.status !== "confirmed";
+
+  const stBadge = p.is_canceled
+    ? `<span class="badge returned">Canceled</span>`
+    : p.status === "confirmed"
+      ? `<span class="badge approved">Confirmed</span>`
+      : p.status === "rejected"
+        ? `<span class="badge returned">Rejected</span>`
+        : `<span class="badge pending">Pending confirmation</span>`;
+
+  const activityState = linkedActivity
+    ? `<span style="color:var(--green-dark)">● Activity linked</span>`
+    : p.status === "confirmed" && !p.is_canceled
+      ? `<span style="color:var(--red)">● Activity missing</span>`
+      : "";
+
   openModal(`
-    <h3>${p.status === "pending" ? "⏳ " : p.status === "rejected" ? "✖ " : "📅 "}${esc(p.title)}</h3>
+    <h3>${p.is_canceled ? "✖ " : p.status === "pending" ? "⏳ " : p.status === "rejected" ? "✖ " : "📅 "}${esc(p.title)}</h3>
     <div style="font-size:13px;color:var(--ink-2);margin-bottom:12px">
       <span class="badge ${p.a_type}">${TYPE_LABEL[p.a_type] || p.a_type}</span>
       ${p.multiplier === 2 ? `<span class="badge pending">⚡ ×2</span>` : `<span class="badge part">1x</span>`}
       ${fmtD(p.plan_date)}${p.a_type === "trip" && p.end_date && p.end_date !== p.plan_date ? " ~ " + fmtD(p.end_date) : ""}${p.plan_time ? " · " + fmt12(p.plan_time) : ""} · ${partBadge(p.part)} · ${stBadge}
     </div>
+
+    ${p.is_canceled && p.cancel_reason ? `<div class="field"><label>Cancel reason</label>
+      <div style="white-space:pre-wrap;background:#fff5f5;border:1.5px solid #f3c9c9;border-radius:8px;padding:10px;font-size:13px">${esc(p.cancel_reason)}</div></div>` : ""}
+
+    ${p.rescheduled_at && p.rescheduled_from_date ? `<div style="font-size:12px;color:var(--ink-2);margin-bottom:10px">↪ Rescheduled from ${fmtD(p.rescheduled_from_date)}</div>` : ""}
+
     ${p.status === "rejected" && p.reject_reason ? `<div class="field"><label>Reject reason</label>
       <div style="white-space:pre-wrap;background:#fff5f5;border:1.5px solid #f3c9c9;border-radius:8px;padding:10px;font-size:13px">${esc(p.reject_reason)}</div></div>` : ""}
+
     <div class="field"><label>Participants</label>
       <div class="chips">${(p.plan_participants || []).map((x) => `<span class="chip">${esc(staffName(x.staff_id))}</span>`).join("") || "-"}</div></div>
-    ${(p.plan_companies || []).length ? `<div class="field"><label>Companies / contracts</label>
+
+    ${(p.plan_companies || []).length || (p.plan_contracts || []).length ? `<div class="field"><label>Companies / contracts</label>
       <div class="chips">${(p.plan_companies || []).map((c) => `<span class="chip">${esc(companyName(c.company_id))}</span>`).join("")}${(p.plan_contracts || []).map((c) => `<span class="chip">${esc(contractName(c.contract_id))}</span>`).join("")}</div></div>` : ""}
+
     ${p.notes ? `<div class="field"><label>Notes</label><div style="white-space:pre-wrap;font-size:13.5px">${esc(p.notes)}</div></div>` : ""}
-    <div style="font-size:12px;color:var(--ink-2)">Created by ${esc(staffName(p.created_by))}${p.status === "confirmed" ? " · ✅ Activity created — see Activities" : ""}</div>
+
+    <div style="font-size:12px;color:var(--ink-2)">
+      Created by ${esc(staffName(p.created_by))}${activityState ? ` · ${activityState}` : ""}
+    </div>
+
     <div class="modal-actions">
-      ${canEdit && p.status !== "confirmed" ? `<button class="btn ghost" id="plDel" style="color:var(--red)">Delete</button><button class="btn ghost" id="plEdit">Edit</button>` : ""}
+      ${canEditDraft ? `<button class="btn ghost" id="plDel" style="color:var(--red)">Delete</button><button class="btn ghost" id="plEdit">Edit</button>` : ""}
+      ${canManage && p.status === "confirmed" && !p.is_canceled ? `<button class="btn ghost" id="plCancel" style="color:var(--amber)">Cancel</button><button class="btn ghost" id="plReschedule">Reschedule</button>` : ""}
+      ${canManage && p.status === "confirmed" && p.is_canceled ? `<button class="btn" id="plReschedule">Reschedule & reactivate</button>` : ""}
+      ${canManage && p.status === "confirmed" && !p.is_canceled && !linkedActivity ? `<button class="btn" id="plRestore">Restore Activity</button>` : ""}
       ${canDecide ? `<button class="btn danger" id="plReject">✖ Reject</button><button class="btn" id="plConfirm">✅ Accept${p.multiplier === 2 ? " (×2)" : " (1x)"}</button>` : ""}
       <button class="btn ${canDecide ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
+
   if ($("#plConfirm")) $("#plConfirm").onclick = async () => {
     const { error } = await sb.rpc("confirm_plan", { p_plan_id: p.id });
     if (error) return alert("Confirm failed: " + error.message);
     closeModal(); renderPlan(); renderRightWidget();
   };
+
   if ($("#plReject")) $("#plReject").onclick = () => {
     openModal(`
       <h3>Reject plan</h3>
@@ -450,12 +500,112 @@ function planDetailModal(p) {
       closeModal(); renderPlan(); renderRightWidget();
     };
   };
+
   if ($("#plEdit")) $("#plEdit").onclick = () => planModal(p);
+
   if ($("#plDel")) $("#plDel").onclick = async () => {
-    if (!confirm("Delete this plan?")) return;
-    await sb.from("plans").delete().eq("id", p.id);
+    if (!confirm("Delete this unconfirmed plan?")) return;
+    const { error } = await sb.from("plans").delete().eq("id", p.id);
+    if (error) return alert("Delete failed: " + error.message);
     closeModal(); renderPlan(); renderRightWidget();
   };
+
+  if ($("#plRestore")) $("#plRestore").onclick = async () => {
+    const button = $("#plRestore");
+    button.disabled = true;
+    button.textContent = "Restoring...";
+    const { error } = await sb.rpc("sync_plan_activity", { p_plan_id: p.id });
+    if (error) {
+      button.disabled = false;
+      button.textContent = "Restore Activity";
+      return alert("Restore failed: " + error.message);
+    }
+    alert("Activity restored from this Plan.");
+    closeModal(); renderPlan(); renderRightWidget();
+  };
+
+  if ($("#plCancel")) $("#plCancel").onclick = () => cancelPlanActivityModal(p);
+  if ($("#plReschedule")) $("#plReschedule").onclick = () => reschedulePlanActivityModal(p);
+}
+
+function reschedulePlanActivityModal(p) {
+  const isTrip = p.a_type === "trip";
+  openModal(`
+    <h3>Reschedule — ${esc(p.title)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">The Plan Calendar item and linked Activity will move together. The original Host and participants stay unchanged.</p>
+    <div class="row2">
+      <div class="field"><label>New date${isTrip ? " (start)" : ""}</label><input type="date" id="rsDate" value="${p.plan_date}" /></div>
+      <div class="field"><label>Time</label>${timePickerHTML("rsT", p.plan_time ? p.plan_time.slice(0, 5) : null)}
+        <div style="font-size:11px;color:var(--ink-2);margin-top:2px"><label style="display:inline;font-weight:400"><input type="checkbox" id="rsNoTime" ${p.plan_time ? "" : "checked"} /> No specific time (all-day)</label></div>
+      </div>
+    </div>
+    ${isTrip ? `<div class="field"><label>New trip end date</label><input type="date" id="rsEnd" value="${p.end_date || p.plan_date}" /></div>` : ""}
+    <div class="field"><label>Reschedule remark (optional)</label><textarea id="rsRemark" placeholder="e.g. Customer requested to postpone the meeting."></textarea></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Back</button><button class="btn" id="rsGo">Save new schedule</button></div>`);
+
+  $("#rsGo").onclick = async () => {
+    const date = $("#rsDate").value;
+    const endDate = isTrip ? ($("#rsEnd").value || date) : null;
+    if (!date) return alert("Select the new date.");
+    if (isTrip && endDate < date) return alert("Trip end date must be on or after the start date.");
+
+    const button = $("#rsGo");
+    button.disabled = true;
+    button.textContent = "Saving...";
+
+    const { error } = await sb.rpc("reschedule_plan_activity", {
+      p_plan_id: p.id,
+      p_plan_date: date,
+      p_end_date: endDate,
+      p_plan_time: $("#rsNoTime").checked ? null : timePickerValue("rsT"),
+      p_remark: $("#rsRemark").value.trim() || null,
+    });
+
+    if (error) {
+      button.disabled = false;
+      button.textContent = "Save new schedule";
+      if (error.message.includes("submitted_or_approved_reports_exist")) {
+        return alert("This Activity already has a submitted or approved report, so its date cannot be moved automatically.");
+      }
+      return alert("Reschedule failed: " + error.message);
+    }
+
+    const d = new Date(`${date}T12:00:00`);
+    planMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    closeModal();
+    if (currentView === "activities") renderActivities();
+    else renderPlan();
+    renderRightWidget();
+  };
+}
+
+function cancelPlanActivityModal(p) {
+  openModal(`
+    <h3>Cancel — ${esc(p.title)}</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">The Plan remains in the Calendar as a canceled record, and the linked Activity is canceled at the same time.</p>
+    <div class="field"><label>Cancel reason</label><textarea id="pcReason" style="min-height:100px" placeholder="e.g. Customer postponed the meeting."></textarea></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Back</button><button class="btn danger" id="pcGo">Cancel Plan & Activity</button></div>`);
+
+  $("#pcGo").onclick = async () => {
+    const reason = $("#pcReason").value.trim();
+    if (!reason) return alert("Enter a cancel reason.");
+    const { error } = await sb.rpc("cancel_plan_activity", { p_plan_id: p.id, p_reason: reason });
+    if (error) return alert("Cancel failed: " + error.message);
+    closeModal();
+    if (currentView === "activities") renderActivities();
+    else renderPlan();
+    renderRightWidget();
+  };
+}
+
+async function loadPlanForLinkedActivity(planId, action) {
+  const { data: p, error } = await sb.from("plans")
+    .select("*, plan_participants(staff_id), plan_companies(company_id), plan_contracts(contract_id)")
+    .eq("id", planId)
+    .single();
+  if (error || !p) return alert("Linked Plan could not be loaded: " + (error?.message || "Not found"));
+  if (action === "cancel") cancelPlanActivityModal(p);
+  else reschedulePlanActivityModal(p);
 }
 
 /* =========================================================
@@ -703,6 +853,7 @@ async function renderRightWidget() {
     sb.from("plans")
       .select("*, plan_participants!inner(staff_id), plan_companies(company_id), plan_contracts(contract_id)")
       .eq("status", "confirmed")
+      .eq("is_canceled", false)
       .eq("plan_participants.staff_id", ME.id)
       .lte("plan_date", tomorrow)
       .or(`plan_date.gte.${today},end_date.gte.${today}`)
@@ -1718,6 +1869,7 @@ async function renderActivities() {
       <td>${esc(a.title)}
         ${(a.activity_contracts || []).length ? `<div style="margin-top:2px">${(a.activity_contracts || []).map((c) => `<span class="badge other">${esc(contractName(c.contract_id))}</span>`).join(" ")}</div>` : ""}
         ${a.notes ? `<div style="font-size:12px;color:var(--ink-2)">${esc(a.notes)}</div>` : ""}
+        ${a.plan_id ? `<div style="font-size:11px;color:var(--green-dark)">📅 Linked to Plan Calendar</div>` : ""}
         ${a.status === "canceled" && a.cancel_reason ? `<div style="font-size:12px;color:var(--red);cursor:pointer" data-cxview="${a.id}" title="Click to read the full cancel remark">✖ ${esc(a.cancel_reason.length > 28 ? a.cancel_reason.slice(0, 28) + "…" : a.cancel_reason)} ${a.cancel_reason.length > 28 ? "<u>more</u>" : ""}</div>` : ""}</td>
       <td>${esc(staffName(a.created_by))}</td>
       <td style="font-size:12.5px">${partNames.map(esc).join(", ") || "-"}</td>
@@ -1726,8 +1878,8 @@ async function renderActivities() {
       <td style="vertical-align:top"><div style="display:flex;flex-wrap:wrap;gap:4px;max-width:150px;justify-content:flex-end">
         ${iAmIn && a.status !== "canceled" ? `<button class="btn ghost sm" data-myrep="${a.id}">My report</button>` : ""}
         ${(mine || reviewer) && a.status !== "canceled" ? `<button class="btn ghost sm" data-edit="${a.id}">Edit</button><button class="btn ghost sm" data-cancel="${a.id}" style="color:var(--amber)">Cancel</button>` : ""}
-        ${(mine || ME.is_admin) ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
-        ${mine && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
+        ${(mine || ME.is_admin) && !a.plan_id ? `<button class="btn ghost sm" data-del="${a.id}" style="color:var(--red)">Delete</button>` : ""}
+        ${(mine || reviewer) && a.status === "canceled" ? `<button class="btn ghost sm" data-resched="${a.id}">Reschedule</button>` : ""}
       </div></td>
     </tr>`;
   }).join("");
@@ -1738,15 +1890,23 @@ async function renderActivities() {
   document.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => activityModal(window.__acts.find((a) => a.id == b.dataset.edit))));
   document.querySelectorAll("[data-resched]").forEach((b) => (b.onclick = () => {
     const src = window.__acts.find((a) => a.id == b.dataset.resched);
+    if (src?.plan_id) return loadPlanForLinkedActivity(src.plan_id, "reschedule");
     switchView("plan");
-    setTimeout(() => planModal(null, null, src), 300); // prefill new plan from canceled activity
+    setTimeout(() => planModal(null, null, src), 300);
   }));
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
-    if (!confirm("Delete this activity? (Use Cancel instead if it was called off — that keeps the record.)")) return;
-    await sb.from("activities").delete().eq("id", b.dataset.del);
+    const src = window.__acts.find((a) => a.id == b.dataset.del);
+    if (src?.plan_id) return alert("This Activity is linked to the Plan Calendar. Use Cancel or Reschedule instead.");
+    if (!confirm("Delete this unlinked activity? (Use Cancel instead if it was called off.)")) return;
+    const { error } = await sb.from("activities").delete().eq("id", b.dataset.del);
+    if (error) return alert("Delete failed: " + error.message);
     renderActivities();
   }));
-  document.querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = () => cancelActivityModal(Number(b.dataset.cancel))));
+  document.querySelectorAll("[data-cancel]").forEach((b) => (b.onclick = () => {
+    const src = window.__acts.find((a) => a.id == b.dataset.cancel);
+    if (src?.plan_id) return loadPlanForLinkedActivity(src.plan_id, "cancel");
+    cancelActivityModal(Number(b.dataset.cancel));
+  }));
   document.querySelectorAll("[data-cxview]").forEach((el) => (el.onclick = () => {
     const a = window.__acts.find((x) => x.id == el.dataset.cxview);
     openModal(`
@@ -1758,6 +1918,7 @@ async function renderActivities() {
         ${a.created_by === ME.id ? `<button class="btn ghost" id="cxResched">Reschedule this</button>` : ""}
         <button class="btn" onclick="closeModal()">Close</button></div>`);
     if ($("#cxResched")) $("#cxResched").onclick = () => {
+      if (a.plan_id) return loadPlanForLinkedActivity(a.plan_id, "reschedule");
       closeModal(); switchView("plan");
       setTimeout(() => planModal(null, null, a), 300);
     };
