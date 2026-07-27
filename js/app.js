@@ -85,6 +85,217 @@ const fmtDT = (d) => { const x = new Date(d); return `${x.getFullYear()}-${Strin
 const staffName = (id) => STAFF.find((s) => s.id === id)?.name || `#${id}`;
 const idEmail = (id) => `${id.trim().toLowerCase()}@${CONFIG.EMAIL_DOMAIN}`;
 
+
+/* =========================================================
+   REPORT CUSTOMER PICS + SAFE RICH TEXT
+   ========================================================= */
+function getReportCustomerPics(reportOrRaw, fallback = "") {
+  let raw = reportOrRaw;
+  let legacy = fallback;
+
+  if (reportOrRaw && typeof reportOrRaw === "object" && !Array.isArray(reportOrRaw)) {
+    raw = reportOrRaw.customer_pics;
+    legacy = reportOrRaw.customer || fallback;
+  }
+
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch (_) { raw = []; }
+  }
+
+  let pics = Array.isArray(raw) ? raw : [];
+  pics = pics
+    .map((p) => ({
+      name: String(p?.name || "").trim(),
+      title: String(p?.title || "").trim(),
+    }))
+    .filter((p) => p.name);
+
+  const oldValue = String(legacy || "").trim();
+  if (!pics.length && oldValue && oldValue !== "Other") {
+    pics = [{ name: oldValue, title: "" }];
+  }
+
+  return pics;
+}
+
+function reportPicSummary(report) {
+  const pics = getReportCustomerPics(report);
+  if (!pics.length) return "";
+  if (pics.length === 1) return pics[0].name;
+  return `${pics[0].name} +${pics.length - 1}`;
+}
+
+function reportPicSearchText(report) {
+  return getReportCustomerPics(report)
+    .map((p) => `${p.name} ${p.title}`.trim())
+    .join(" ");
+}
+
+function reportPicsDisplayHTML(report) {
+  const pics = getReportCustomerPics(report);
+  if (!pics.length) return "";
+  return `
+    <div class="report-pic-display">
+      <div class="report-pic-display-title">Customer PIC${pics.length > 1 ? "s" : ""}</div>
+      <div class="report-pic-display-list">
+        ${pics.map((p) => `
+          <div class="report-pic-display-item">
+            <b>${esc(p.name)}</b>
+            ${p.title ? `<span>${esc(p.title)}</span>` : ""}
+          </div>
+        `).join("")}
+      </div>
+    </div>`;
+}
+
+function looksLikeRichHTML(value) {
+  return /<\/?(?:b|strong|i|em|u|mark|span|ul|li|p|div|br)\b/i.test(String(value || ""));
+}
+
+function plainTextToRichHTML(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line ? `<div>${esc(line)}</div>` : "<div><br></div>")
+    .join("");
+}
+
+function sanitizeRichHTML(value) {
+  const source = String(value || "");
+  if (!source.trim()) return "";
+
+  const parser = new DOMParser();
+  const parsed = parser.parseFromString(`<div>${source}</div>`, "text/html");
+  const sourceRoot = parsed.body.firstElementChild;
+  const outputRoot = document.createElement("div");
+  const allowed = new Set(["b", "strong", "i", "em", "u", "mark", "span", "ul", "li", "p", "div", "br"]);
+  const blocked = new Set(["script", "style", "iframe", "object", "embed", "svg", "math", "link", "meta"]);
+
+  const cleanNode = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return document.createTextNode(node.nodeValue || "");
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return document.createDocumentFragment();
+    }
+
+    const tag = node.tagName.toLowerCase();
+    if (blocked.has(tag)) return document.createDocumentFragment();
+
+    const appendChildren = (parent) => {
+      [...node.childNodes].forEach((child) => parent.appendChild(cleanNode(child)));
+      return parent;
+    };
+
+    if (!allowed.has(tag)) {
+      return appendChildren(document.createDocumentFragment());
+    }
+
+    const normalizedTag = tag === "div" ? "div" : tag;
+    const clean = document.createElement(normalizedTag);
+
+    if (tag === "span") {
+      const bg = node.style?.backgroundColor || "";
+      if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") {
+        clean.style.backgroundColor = "#fff2a8";
+      }
+    }
+
+    return appendChildren(clean);
+  };
+
+  [...sourceRoot.childNodes].forEach((node) => outputRoot.appendChild(cleanNode(node)));
+  return outputRoot.innerHTML;
+}
+
+function richValueForEditor(value) {
+  const raw = String(value || "");
+  return sanitizeRichHTML(looksLikeRichHTML(raw) ? raw : plainTextToRichHTML(raw));
+}
+
+function richTextToPlain(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  if (!looksLikeRichHTML(raw)) return raw;
+  const holder = document.createElement("div");
+  holder.innerHTML = sanitizeRichHTML(raw);
+  return (holder.innerText || holder.textContent || "").replace(/\u00a0/g, " ").trim();
+}
+
+function renderRichContent(value) {
+  const raw = String(value || "");
+  if (!raw.trim()) return "-";
+  if (looksLikeRichHTML(raw)) return sanitizeRichHTML(raw) || "-";
+  return esc(raw).replace(/\r?\n/g, "<br>");
+}
+
+function richEditorFieldHTML(id, label, value, minHeight = 150) {
+  return `
+    <div class="field rich-field">
+      <label>${esc(label)}</label>
+      <div class="rich-editor-shell">
+        <div class="rich-toolbar" role="toolbar" aria-label="${esc(label)} formatting">
+          <button type="button" data-rich-target="${id}" data-rich-command="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+          <button type="button" data-rich-target="${id}" data-rich-command="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+          <button type="button" data-rich-target="${id}" data-rich-command="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+          <button type="button" data-rich-target="${id}" data-rich-command="highlight" title="Highlight"><span class="rich-highlight-icon">H</span></button>
+          <button type="button" data-rich-target="${id}" data-rich-command="insertUnorderedList" title="Bulleted list">• List</button>
+        </div>
+        <div
+          id="${id}"
+          class="rich-editor"
+          contenteditable="true"
+          spellcheck="true"
+          style="min-height:${minHeight}px"
+        >${richValueForEditor(value)}</div>
+      </div>
+      <div class="rich-editor-help">Ctrl+B / Ctrl+I / Ctrl+U supported. Enter continues a bullet; Enter on an empty bullet exits the list.</div>
+    </div>`;
+}
+
+function bindRichEditor(id) {
+  const editor = $("#" + id);
+  if (!editor) return;
+
+  document.querySelectorAll(`[data-rich-target="${id}"]`).forEach((button) => {
+    button.onmousedown = (event) => {
+      event.preventDefault();
+      editor.focus();
+      const command = button.dataset.richCommand;
+      if (command === "highlight") {
+        document.execCommand("hiliteColor", false, "#fff2a8");
+      } else {
+        document.execCommand(command, false, null);
+      }
+    };
+  });
+
+  editor.onkeydown = (event) => {
+    if (!(event.ctrlKey || event.metaKey)) return;
+    const key = event.key.toLowerCase();
+    const commands = { b: "bold", i: "italic", u: "underline" };
+    if (!commands[key]) return;
+    event.preventDefault();
+    document.execCommand(commands[key], false, null);
+  };
+
+  editor.onpaste = (event) => {
+    event.preventDefault();
+    const text = event.clipboardData?.getData("text/plain") || "";
+    document.execCommand("insertText", false, text);
+  };
+}
+
+function getRichEditorHTML(id) {
+  const editor = $("#" + id);
+  if (!editor) return "";
+  const clean = sanitizeRichHTML(editor.innerHTML);
+  const holder = document.createElement("div");
+  holder.innerHTML = clean;
+  return (holder.innerText || holder.textContent || "").trim() ? clean : "";
+}
+
 /* =========================================================
    COMPANY / CONTRACT TAG PANEL (shared by activity & report modals)
    ========================================================= */
@@ -2236,8 +2447,15 @@ async function drawReportList(sel, onlySubmitted = false) {
     if (repFilter.part) reps = reps.filter((r) => r.part === repFilter.part);
   }
   if (coFilter[key]) reps = reps.filter((r) => (r.report_companies || []).some((c) => c.company_id === coFilter[key]));
-  if (searchQ[key]) reps = reps.filter((r) => matchesSearch(searchQ[key], r.title, r.customer, r.content, r.followup, staffName(r.author_id),
-    (r.report_companies || []).map((c) => companyName(c.company_id)).join(" ")));
+  if (searchQ[key]) reps = reps.filter((r) => matchesSearch(
+    searchQ[key],
+    r.title,
+    reportPicSearchText(r),
+    richTextToPlain(r.content),
+    richTextToPlain(r.followup),
+    staffName(r.author_id),
+    (r.report_companies || []).map((c) => companyName(c.company_id)).join(" ")
+  ));
   const tagName = (id) => TAGS.find((t) => t.id === id)?.name || "";
   const rows = reps.map((r) => `
     <tr class="clickable" data-open="${r.id}">
@@ -2248,7 +2466,7 @@ async function drawReportList(sel, onlySubmitted = false) {
         ${(r.report_contracts || []).map((c) => `<span class="badge vc">${esc(contractName(c.contract_id))}</span>`).join("")}
         ${(r.report_tags || []).map((t) => `<span class="badge other">${esc(tagName(t.tag_id))}</span>`).join("")}
       </div></td>
-      <td style="vertical-align:top">${r.customer && r.customer !== "Other" ? `<b>${esc(r.customer)}</b>` : `<span style="color:var(--ink-2)">-</span>`}</td>
+      <td style="vertical-align:top">${reportPicSummary(r) ? `<b>${esc(reportPicSummary(r))}</b>` : `<span style="color:var(--ink-2)">-</span>`}</td>
       <td>${esc(r.title)}</td>
       <td>${esc(staffName(r.author_id))} ${partBadge(r.part)}</td>
       <td>v${r.version}</td>
@@ -2297,67 +2515,149 @@ function reportModal(edit = null, fromActivity = null) {
     : fromActivity ? (fromActivity.activity_companies || []).map((c) => c.company_id) : []);
   const pickedCts = new Set(edit ? (edit.report_contracts || []).map((c) => c.contract_id)
     : fromActivity ? (fromActivity.activity_contracts || []).map((c) => c.contract_id) : []);
+
+  let customerPics = getReportCustomerPics(
+    edit?.customer_pics,
+    edit?.customer || fromActivity?.customer || ""
+  );
+  if (!customerPics.length) customerPics = [{ name: "", title: "" }];
+
   openModal(`
     <h3>${edit ? `Edit report (v${edit.version})` : fromActivity ? `Report for: ${esc(fromActivity.title)}` : "New report"}</h3>
     <div class="row2">
       <div class="field"><label>Report type</label><select id="rType">
         ${Object.entries(RTYPE_LABEL).map(([k, v]) => `<option value="${k}" ${edit?.report_type === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>
-      <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || fromActivity?.activity_date || new Date().toISOString().slice(0, 10)}" /></div>
+      <div class="field"><label>Meeting date</label><input type="date" id="rDate" value="${edit?.meeting_date || fromActivity?.activity_date || localYMD()}" /></div>
     </div>
     ${TAGS.length ? `<div class="field"><label>Tags (optional, multiple)</label>
       <div class="chips">${TAGS.map((t) => `<span class="chip tagpick" data-tid="${t.id}" style="cursor:pointer;${pickedTags.has(t.id) ? "background:var(--navy);color:#fff" : ""}">${esc(t.name)}</span>`).join("")}</div>
     </div>` : ""}
     ${tagPanelHTML()}
-    <div class="field"><label>Customer PIC (optional, free text)</label><input id="rCust" value="${esc(edit?.customer === "Other" ? "" : edit?.customer || fromActivity?.customer || "")}" placeholder="e.g. Capt. Kim — or team name for internal reports" /></div>
+
+    <div class="field">
+      <div class="report-pic-head">
+        <label style="margin:0">Customer PICs (optional)</label>
+        <button type="button" class="btn ghost sm" id="rAddPic">+ Add Customer PIC</button>
+      </div>
+      <div id="rPicRows" class="report-pic-list"></div>
+      <div class="report-pic-help">Add each customer's name and optional position/title. All names appear inside the report.</div>
+    </div>
+
     <div class="field"><label>Title</label><input id="rTitle" value="${esc(edit?.title || fromActivity?.title || "")}" placeholder="e.g. Seaspan 14K ACONIS replacement discussion" /></div>
-    <div class="field"><label>Discussion</label><textarea id="rContent" style="min-height:160px">${esc(edit?.content || "")}</textarea></div>
-    <div class="field"><label>Follow-up (action items)</label><textarea id="rFollow">${esc(edit?.followup || "")}</textarea></div>
+    ${richEditorFieldHTML("rContent", "Discussion", edit?.content || "", 180)}
+    ${richEditorFieldHTML("rFollow", "Follow-up (action items)", edit?.followup || "", 110)}
     <div class="modal-actions">
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="rSave">${edit ? (edit.status === "returned" ? "Save & resubmit" : "Save") : "Submit report"}</button>
     </div>`);
+
+  const drawCustomerPics = () => {
+    $("#rPicRows").innerHTML = customerPics.map((p, index) => `
+      <div class="report-pic-row" data-pic-index="${index}">
+        <input data-pic-name="${index}" value="${esc(p.name)}" placeholder="Name (e.g. Kshitij Saxena)" />
+        <input data-pic-title="${index}" value="${esc(p.title)}" placeholder="Title / Position (optional)" />
+        <button type="button" class="report-pic-remove" data-pic-remove="${index}" title="Remove">×</button>
+      </div>`).join("");
+
+    document.querySelectorAll("[data-pic-name]").forEach((input) => {
+      input.oninput = () => { customerPics[Number(input.dataset.picName)].name = input.value; };
+    });
+    document.querySelectorAll("[data-pic-title]").forEach((input) => {
+      input.oninput = () => { customerPics[Number(input.dataset.picTitle)].title = input.value; };
+    });
+    document.querySelectorAll("[data-pic-remove]").forEach((button) => {
+      button.onclick = () => {
+        customerPics.splice(Number(button.dataset.picRemove), 1);
+        if (!customerPics.length) customerPics.push({ name: "", title: "" });
+        drawCustomerPics();
+      };
+    });
+  };
+
+  drawCustomerPics();
+  $("#rAddPic").onclick = () => {
+    customerPics.push({ name: "", title: "" });
+    drawCustomerPics();
+    const rows = document.querySelectorAll("#rPicRows .report-pic-row");
+    rows[rows.length - 1]?.querySelector("input")?.focus();
+  };
+
   bindTagPanel(pickedCos, pickedCts);
+  bindRichEditor("rContent");
+  bindRichEditor("rFollow");
+
   document.querySelectorAll(".tagpick").forEach((c) => (c.onclick = () => {
     const id = Number(c.dataset.tid);
     if (pickedTags.has(id)) { pickedTags.delete(id); c.style.background = ""; c.style.color = ""; }
     else { pickedTags.add(id); c.style.background = "var(--navy)"; c.style.color = "#fff"; }
   }));
+
   $("#rSave").onclick = async () => {
-    const rec = { customer: $("#rCust").value.trim(), meeting_date: $("#rDate").value,
+    const cleanPics = customerPics
+      .map((p) => ({ name: String(p.name || "").trim(), title: String(p.title || "").trim() }))
+      .filter((p) => p.name);
+
+    const rec = {
+      customer: cleanPics.map((p) => p.name).join(", "),
+      customer_pics: cleanPics,
+      meeting_date: $("#rDate").value,
       report_type: $("#rType").value,
-      title: $("#rTitle").value.trim(), content: $("#rContent").value,
-      followup: $("#rFollow").value, updated_at: new Date().toISOString() };
+      title: $("#rTitle").value.trim(),
+      content: getRichEditorHTML("rContent"),
+      followup: getRichEditorHTML("rFollow"),
+      updated_at: new Date().toISOString(),
+    };
+
     if (!rec.title) return alert("Title is required.");
-    let repId;
-    if (edit) {
-      // 반송 상태에서 저장하면 자동 재제출 (버전 +1)
-      const resubmit = edit.status === "returned";
-      const upd = resubmit ? { ...rec, status: "submitted", version: edit.version + 1 } : rec;
-      const { error } = await sb.from("reports").update(upd).eq("id", edit.id);
-      if (error) return alert("Save failed: " + error.message);
-      repId = edit.id;
-      await logEvent(repId, "edit", null, resubmit ? edit.version + 1 : edit.version, rec.content, rec.followup);
-      if (resubmit) await logEvent(repId, "submit", null, edit.version + 1, rec.content, rec.followup);
-    } else {
-      // 등록 = 즉시 제출 (별도 Submit 단계 없음)
-      const { data, error } = await sb.from("reports").insert({ ...rec, status: "submitted", author_id: ME.id, part: ME.part, activity_id: fromActivity?.id || null }).select("id").single();
-      if (error) return alert("Save failed: " + error.message);
-      repId = data.id;
-      if (fromActivity?.plan_id) {
-        const { data: pl } = await sb.from("plans").select("task_id,todo_id").eq("id", fromActivity.plan_id).maybeSingle();
-        if (pl?.task_id) await sb.from("task_comments").insert({ task_id: pl.task_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
-        if (pl?.todo_id) await sb.from("todo_comments").insert({ todo_id: pl.todo_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
+
+    const saveButton = $("#rSave");
+    saveButton.disabled = true;
+    saveButton.textContent = "Saving...";
+
+    try {
+      let repId;
+      if (edit) {
+        const resubmit = edit.status === "returned";
+        const upd = resubmit ? { ...rec, status: "submitted", version: edit.version + 1 } : rec;
+        const { error } = await sb.from("reports").update(upd).eq("id", edit.id);
+        if (error) return alert("Save failed: " + error.message);
+        repId = edit.id;
+        await logEvent(repId, "edit", null, resubmit ? edit.version + 1 : edit.version, rec.content, rec.followup);
+        if (resubmit) await logEvent(repId, "submit", null, edit.version + 1, rec.content, rec.followup);
+      } else {
+        const { data, error } = await sb.from("reports").insert({
+          ...rec,
+          status: "submitted",
+          author_id: ME.id,
+          part: ME.part,
+          activity_id: fromActivity?.id || null,
+        }).select("id").single();
+        if (error) return alert("Save failed: " + error.message);
+        repId = data.id;
+        if (fromActivity?.plan_id) {
+          const { data: pl } = await sb.from("plans").select("task_id,todo_id").eq("id", fromActivity.plan_id).maybeSingle();
+          if (pl?.task_id) await sb.from("task_comments").insert({ task_id: pl.task_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
+          if (pl?.todo_id) await sb.from("todo_comments").insert({ todo_id: pl.todo_id, author_id: ME.id, body: `📝 Report submitted for "${fromActivity.title}"` });
+        }
+        await logEvent(repId, "create", null, 1, rec.content, rec.followup);
+        await logEvent(repId, "submit", null, 1, rec.content, rec.followup);
       }
-      await logEvent(repId, "create", null, 1, rec.content, rec.followup);
-      await logEvent(repId, "submit", null, 1, rec.content, rec.followup);
+
+      await sb.from("report_tags").delete().eq("report_id", repId);
+      if (pickedTags.size) await sb.from("report_tags").insert([...pickedTags].map((tid) => ({ report_id: repId, tag_id: tid })));
+      await sb.from("report_companies").delete().eq("report_id", repId);
+      await sb.from("report_contracts").delete().eq("report_id", repId);
+      if (pickedCos.size) await sb.from("report_companies").insert([...pickedCos].map((id) => ({ report_id: repId, company_id: id })));
+      if (pickedCts.size) await sb.from("report_contracts").insert([...pickedCts].map((id) => ({ report_id: repId, contract_id: id })));
+
+      closeModal();
+      openReport(repId);
+    } finally {
+      if (document.body.contains(saveButton)) {
+        saveButton.disabled = false;
+        saveButton.textContent = edit ? (edit.status === "returned" ? "Save & resubmit" : "Save") : "Submit report";
+      }
     }
-    await sb.from("report_tags").delete().eq("report_id", repId);
-    if (pickedTags.size) await sb.from("report_tags").insert([...pickedTags].map((tid) => ({ report_id: repId, tag_id: tid })));
-    await sb.from("report_companies").delete().eq("report_id", repId);
-    await sb.from("report_contracts").delete().eq("report_id", repId);
-    if (pickedCos.size) await sb.from("report_companies").insert([...pickedCos].map((id) => ({ report_id: repId, company_id: id })));
-    if (pickedCts.size) await sb.from("report_contracts").insert([...pickedCts].map((id) => ({ report_id: repId, contract_id: id })));
-    closeModal(); openReport(repId);
   };
 }
 
@@ -2392,6 +2692,7 @@ function diffWords(oldStr, newStr) {
 async function openReport(id) {
   const { data: r } = await sb.from("reports").select("*, report_tags(tag_id), report_companies(company_id), report_contracts(contract_id)").eq("id", id).single();
   if (!r) return alert("Can't open this report (no permission).");
+  const reportPics = getReportCustomerPics(r);
   openedReportId = id;
   const { data: events } = await sb.from("report_events").select("*").eq("report_id", id).order("created_at", { ascending: false });
 
@@ -2410,9 +2711,13 @@ async function openReport(id) {
   asc.forEach((e) => {
     if (e.content_snapshot !== null && e.content_snapshot !== undefined) {
       if (e.action === "edit" && prevSnap) {
-        const dc = diffWords(prevSnap.c, e.content_snapshot);
-        const df = diffWords(prevSnap.f, e.followup_snapshot);
-        if ((dc && dc !== esc(e.content_snapshot)) || (df && df !== esc(e.followup_snapshot ?? "")))
+        const oldContent = richTextToPlain(prevSnap.c);
+        const newContent = richTextToPlain(e.content_snapshot);
+        const oldFollowup = richTextToPlain(prevSnap.f);
+        const newFollowup = richTextToPlain(e.followup_snapshot);
+        const dc = diffWords(oldContent, newContent);
+        const df = diffWords(oldFollowup, newFollowup);
+        if (oldContent !== newContent || oldFollowup !== newFollowup)
           diffs[e.id] = { dc, df };
       }
       prevSnap = { c: e.content_snapshot, f: e.followup_snapshot };
@@ -2431,15 +2736,16 @@ async function openReport(id) {
       <span class="badge ${r.status}">${ST_LABEL[r.status]}</span>
       <span class="badge part">v${r.version}</span>
     </div>
-    <div class="page-sub">${r.customer && r.customer !== "Other" ? "PIC: " + esc(r.customer) + " · " : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})${r.activity_id ? " · 🔗 linked to activity" : ""}</div>
+    <div class="page-sub">${reportPics.length ? `${reportPics.length} Customer PIC${reportPics.length > 1 ? "s" : ""} · ` : ""}Meeting date ${fmtD(r.meeting_date)} · Author ${esc(staffName(r.author_id))} (${esc(r.part)})${r.activity_id ? " · 🔗 linked to activity" : ""}</div>
 
     <div class="two-col">
       <div>
         <div class="card" style="margin-bottom:14px">
+          ${reportPicsDisplayHTML(r)}
           <h2 style="font-size:14px;margin-bottom:8px">Discussion</h2>
-          <div class="report-content">${esc(r.content) || "-"}</div>
+          <div class="report-content rich-report-output">${renderRichContent(r.content)}</div>
           <h2 style="font-size:14px;margin:14px 0 8px">Follow-up (action items)</h2>
-          <div class="report-content">${esc(r.followup) || "-"}</div>
+          <div class="report-content rich-report-output">${renderRichContent(r.followup)}</div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           ${canEdit ? `<button class="btn ghost" id="repEdit">✏️ Edit${canReview && !isAuthor ? " (as reviewer)" : ""}${isAuthor && r.status === "returned" ? " & resubmit" : ""}</button>` : ""}
