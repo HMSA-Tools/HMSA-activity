@@ -868,6 +868,111 @@ const nameTag = (id) => { const c = staffColor(id); return `<span class="name-ta
 const agoTxt = (ts) => { const d = Math.floor((Date.now() - new Date(ts)) / 86400000); return d <= 0 ? "today" : d + "d ago"; };
 const amountTxt = (a) => (a === null || a === undefined || a === "" ? "" : `$${Number(a)}K`);
 
+// Workboard grid: Windows-icon style snap layout.
+// Blank cells stay blank when a card is moved away. Dropping on an occupied
+// cell pushes only that column downward, so the team's manual column meaning
+// is preserved.
+const BOARD_COLS = 4;
+const BOARD_CARD_W = 250;
+const BOARD_CARD_H = 152;
+const BOARD_GAP_X = 14;
+const BOARD_GAP_Y = 14;
+const BOARD_PAD = 12;
+let taskUndoTimer = null;
+
+const boardCellKey = (col, row) => `${col}:${row}`;
+const boardCellToPos = (col, row) => ({
+  x: BOARD_PAD + col * (BOARD_CARD_W + BOARD_GAP_X),
+  y: BOARD_PAD + row * (BOARD_CARD_H + BOARD_GAP_Y),
+});
+const boardPosToCell = (task) => ({
+  col: Math.max(0, Math.min(BOARD_COLS - 1, Math.round((Number(task.pos_x) - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X)))),
+  row: Math.max(0, Math.round((Number(task.pos_y) - BOARD_PAD) / (BOARD_CARD_H + BOARD_GAP_Y))),
+});
+const hasBoardPosition = (task) => task.pos_x !== null && task.pos_x !== undefined && task.pos_x !== ""
+  && task.pos_y !== null && task.pos_y !== undefined && task.pos_y !== ""
+  && Number.isFinite(Number(task.pos_x)) && Number.isFinite(Number(task.pos_y));
+
+function buildBoardLayout(allTasks) {
+  const occupied = new Map();
+  const cells = new Map();
+  const explicit = [];
+  const automatic = [];
+
+  (allTasks || []).forEach((task) => {
+    if (hasBoardPosition(task)) explicit.push(task);
+    else automatic.push(task);
+  });
+
+  explicit.sort((a, b) => {
+    const ac = boardPosToCell(a);
+    const bc = boardPosToCell(b);
+    return ac.row - bc.row || ac.col - bc.col || Number(a.id) - Number(b.id);
+  });
+
+  // Existing positions are respected. Old overlapping coordinates are only
+  // pushed downward inside the same column; no global auto-arrange occurs.
+  explicit.forEach((task) => {
+    const start = boardPosToCell(task);
+    let row = start.row;
+    while (occupied.has(boardCellKey(start.col, row))) row += 1;
+    const cell = { col: start.col, row };
+    cells.set(Number(task.id), cell);
+    occupied.set(boardCellKey(cell.col, cell.row), Number(task.id));
+  });
+
+  automatic.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0) || Number(a.id) - Number(b.id));
+  automatic.forEach((task) => {
+    let row = 0;
+    let col = 0;
+    let found = false;
+    while (!found) {
+      for (col = 0; col < BOARD_COLS; col += 1) {
+        if (!occupied.has(boardCellKey(col, row))) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) row += 1;
+    }
+    const cell = { col, row };
+    cells.set(Number(task.id), cell);
+    occupied.set(boardCellKey(col, row), Number(task.id));
+  });
+
+  return { cells, occupied };
+}
+
+function boardAppendCell(allTasks, columnIndex) {
+  const col = Math.max(0, Math.min(BOARD_COLS - 1, Number(columnIndex) || 0));
+  const layout = buildBoardLayout(allTasks || []);
+  let maxRow = -1;
+  layout.cells.forEach((cell) => {
+    if (cell.col === col) maxRow = Math.max(maxRow, cell.row);
+  });
+  return { col, row: maxRow + 1 };
+}
+
+function showTaskUndoToast(taskId) {
+  document.querySelectorAll('.task-undo-toast').forEach((el) => el.remove());
+  if (taskUndoTimer) clearTimeout(taskUndoTimer);
+
+  const toast = document.createElement('div');
+  toast.className = 'task-undo-toast';
+  toast.innerHTML = `<span>Task marked as done.</span><button type="button">↩ Undo</button>`;
+  document.body.appendChild(toast);
+
+  toast.querySelector('button').onclick = async () => {
+    const { error } = await sb.from('tasks').update({ status: 'progress' }).eq('id', taskId);
+    if (error) return alert('Undo failed: ' + error.message);
+    toast.remove();
+    if (taskUndoTimer) clearTimeout(taskUndoTimer);
+    if (currentView === 'board') renderBoard();
+  };
+
+  taskUndoTimer = setTimeout(() => toast.remove(), 8000);
+}
+
 function cardBG(t) {
   if (t.status === "canceled") return "#e9ecef";
   const cols = (t.task_assignees || []).map((a) => staffColor(a.staff_id) + "2e");
@@ -926,14 +1031,17 @@ async function renderBoard() {
       .select("id,task_id,body,author_id,created_at,needs_ack,acked_by,acked_at")
       .order("created_at", { ascending: true }),
   ]);
-  let tasks = tRaw || [];
+  const allTasks = tRaw || [];
+  let tasks = [...allTasks];
   const cmts = cRaw || [];
-  window.__tasks = tasks;
+  const boardLayout = buildBoardLayout(allTasks);
+  window.__tasks = allTasks;
+  window.__boardLayout = boardLayout;
   if (!$("#boardCanvas")) return;
 
   tasks = tasks.filter((t) => (t.status !== "done" || boardShow.done) && (t.status !== "canceled" || boardShow.canceled));
   if (boardCoFilter) tasks = tasks.filter((t) => (t.task_companies || []).some((c) => c.company_id === boardCoFilter));
-  // 초기 정렬: 금액 큰 순 (위치 미지정 카드의 자동 배치 순서)
+  // List view keeps the business-first amount order. Canvas uses saved cells.
   tasks.sort((a, b) => (Number(b.amount) || 0) - (Number(a.amount) || 0));
 
   if (boardView === "list") {
@@ -1000,20 +1108,15 @@ async function renderBoard() {
     return;
   }
 
-  const CW = 250, CH = 165, COLS = 3;
-  let autoIdx = 0;
   const cardHTML = (t) => {
-    let x = t.pos_x, y = t.pos_y;
-    if (x === null || x === undefined || y === null || y === undefined) {
-      x = 12 + (autoIdx % COLS) * (CW + 14);
-      y = 12 + Math.floor(autoIdx / COLS) * (CH + 14);
-      autoIdx++;
-    }
+    const cell = boardLayout.cells.get(Number(t.id)) || { col: 0, row: 0 };
+    const pos = boardCellToPos(cell.col, cell.row);
     const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
     const n = cmts.filter((c) => c.task_id === t.id);
     const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
     return `<div class="tcard ${t.status === "canceled" ? "dead" : ""} ${over ? "overdue" : ""}" draggable="true"
-      data-task="${t.id}" style="background:${cardBG(t)};position:absolute;left:${x}px;top:${y}px;width:${CW}px">
+      data-task="${t.id}" data-col="${cell.col}" data-row="${cell.row}"
+      style="background:${cardBG(t)};position:absolute;left:${pos.x}px;top:${pos.y}px;width:${BOARD_CARD_W}px;height:${BOARD_CARD_H}px">
       ${wmHTML(t)}
       <div class="tcard-top">
         <span style="display:flex;gap:5px;align-items:center">
@@ -1022,8 +1125,8 @@ async function renderBoard() {
         </span>
         ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}
       </div>
-      <div class="tcard-title">${esc(t.title)}</div>
-      <div style="margin-bottom:6px">${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || `<span style="font-size:10.5px;color:var(--ink-2)">unassigned</span>`}</div>
+      <div class="tcard-title" title="${esc(t.title)}">${esc(t.title)}</div>
+      <div class="tcard-assignees">${(t.task_assignees || []).map((a) => nameTag(a.staff_id)).join("") || `<span style="font-size:10.5px;color:var(--ink-2)">unassigned</span>`}</div>
       <div class="tcard-foot">
         <span>F/up ${agoTxt(t.last_fup)}</span>
         <span>${pendingAck ? `<span style="color:#b08800;font-weight:800">⏳${pendingAck}</span> ` : ""}💬 ${n.length}</span>
@@ -1031,37 +1134,105 @@ async function renderBoard() {
     </div>`;
   };
 
-  const canvasH = Math.max(560, (Math.floor((tasks.length - 1) / COLS) + 1) * (CH + 14) + 240);
-  $("#boardCanvas").style.minHeight = canvasH + "px";
-  $("#boardCanvas").innerHTML = tasks.map(cardHTML).join("") ||
-    `<div class="empty" style="padding-top:60px">No tasks in ${esc(boardPart)}. Create the first one!</div>`;
+  let maxRow = 0;
+  boardLayout.cells.forEach((cell) => { maxRow = Math.max(maxRow, cell.row); });
+  const surfaceW = BOARD_PAD * 2 + BOARD_COLS * BOARD_CARD_W + (BOARD_COLS - 1) * BOARD_GAP_X;
+  const surfaceH = Math.max(560, BOARD_PAD * 2 + (maxRow + 1) * BOARD_CARD_H + maxRow * BOARD_GAP_Y + 120);
+  $("#boardCanvas").style.minHeight = "0";
+  $("#boardCanvas").innerHTML = `<div id="boardGridSurface" class="board-grid-surface" style="width:${surfaceW}px;min-height:${surfaceH}px">
+    ${tasks.map(cardHTML).join("") || `<div class="empty" style="padding-top:60px">No tasks in ${esc(boardPart)}. Create the first one!</div>`}
+  </div>`;
 
   // click → detail
-  document.querySelectorAll("[data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
-  // drag & drop (shared positions)
-  const canvas = $("#boardCanvas");
-  let dragEl = null, dx = 0, dy = 0;
-  document.querySelectorAll("[data-task]").forEach((el) => {
+  document.querySelectorAll("#boardGridSurface [data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
+
+  // Windows-icon style drag/drop: snap to a cell, never overlap, and only
+  // push cards below the target cell in that same column.
+  const surface = $("#boardGridSurface");
+  let dragEl = null;
+  let dx = 0;
+  let dy = 0;
+  document.querySelectorAll("#boardGridSurface [data-task]").forEach((el) => {
     el.addEventListener("dragstart", (e) => {
       dragEl = el;
       const r = el.getBoundingClientRect();
-      dx = e.clientX - r.left; dy = e.clientY - r.top;
+      dx = e.clientX - r.left;
+      dy = e.clientY - r.top;
       e.dataTransfer.effectAllowed = "move";
+      el.classList.add("dragging");
     });
+    el.addEventListener("dragend", () => el.classList.remove("dragging"));
   });
-  canvas.addEventListener("dragover", (e) => e.preventDefault());
-  canvas.addEventListener("drop", async (e) => {
+
+  surface.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  });
+
+  surface.addEventListener("drop", async (e) => {
     e.preventDefault();
     if (!dragEl) return;
-    const cr = canvas.getBoundingClientRect();
-    const x = Math.max(0, Math.round(e.clientX - cr.left - dx));
-    const y = Math.max(0, Math.round(e.clientY - cr.top - dy));
-    dragEl.style.left = x + "px"; dragEl.style.top = y + "px";
-    const id = Number(dragEl.dataset.task);
+
+    const draggedId = Number(dragEl.dataset.task);
+    const sr = surface.getBoundingClientRect();
+    const rawX = e.clientX - sr.left - dx;
+    const rawY = e.clientY - sr.top - dy;
+    const targetCol = Math.max(0, Math.min(BOARD_COLS - 1, Math.round((rawX - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X))));
+    const targetRow = Math.max(0, Math.round((rawY - BOARD_PAD) / (BOARD_CARD_H + BOARD_GAP_Y)));
+
+    const currentCells = new Map();
+    boardLayout.cells.forEach((cell, id) => currentCells.set(Number(id), { ...cell }));
+    const occupied = new Map();
+    currentCells.forEach((cell, id) => {
+      if (id !== draggedId) occupied.set(boardCellKey(cell.col, cell.row), id);
+    });
+
+    // Insert dragged card into the target cell. An occupied target creates a
+    // downward chain only in the target column. The old source cell stays blank.
+    const changed = new Map();
+    let incomingId = draggedId;
+    let row = targetRow;
+    while (incomingId) {
+      const key = boardCellKey(targetCol, row);
+      const displacedId = occupied.get(key) || null;
+      occupied.set(key, incomingId);
+      changed.set(incomingId, { col: targetCol, row });
+      incomingId = displacedId;
+      row += 1;
+    }
+
+    changed.forEach((cell, id) => {
+      const el = document.querySelector(`#boardGridSurface [data-task="${id}"]`);
+      if (!el) return;
+      const pos = boardCellToPos(cell.col, cell.row);
+      el.style.left = pos.x + "px";
+      el.style.top = pos.y + "px";
+      el.dataset.col = String(cell.col);
+      el.dataset.row = String(cell.row);
+    });
+
+    const requiredH = Math.max(surfaceH, BOARD_PAD * 2 + (row + 1) * BOARD_CARD_H + row * BOARD_GAP_Y + 120);
+    surface.style.minHeight = requiredH + "px";
+    dragEl.classList.remove("dragging");
     dragEl = null;
-    const { error } = await sb.from("tasks").update({ pos_x: x, pos_y: y }).eq("id", id);
-    if (error) alert("Position not saved (only people involved in a task can move it): " + error.message);
+
+    const moves = [...changed.entries()].map(([id, cell]) => {
+      const pos = boardCellToPos(cell.col, cell.row);
+      return { id, x: pos.x, y: pos.y };
+    });
+
+    const { error } = await sb.rpc("move_workboard_cards", {
+      p_dragged_task_id: draggedId,
+      p_moves: moves,
+    });
+    if (error) {
+      alert("Position not saved: " + error.message);
+      renderBoard();
+      return;
+    }
+    renderBoard();
   });
+
 
 }
 
@@ -1261,6 +1432,9 @@ function taskModal(edit = null) {
       <div class="field"><label>Amount (K$, optional)</label><input type="number" min="0" step="1" id="tkAmt" value="${edit?.amount ?? ""}" placeholder="e.g. 15 → $15K" /></div>
       <div class="field"><label>Due date (optional)</label><input type="date" id="tkDue" value="${edit?.due_date || ""}" /></div>
     </div>
+    ${!edit ? `<div class="field"><label>Place in board column</label><select id="tkBoardCol">
+      ${Array.from({ length: BOARD_COLS }, (_, i) => `<option value="${i}">Column ${i + 1}</option>`).join("")}
+    </select><div style="font-size:11px;color:var(--ink-2);margin-top:4px">The new card is added at the bottom of this column. You can drag it later.</div></div>` : ""}
     ${edit ? `<div class="field"><label>Status</label><select id="tkSt">
       ${Object.entries(TASK_ST).map(([k, v]) => `<option value="${k}" ${edit?.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>` : ""}
     <div class="field"><label>Details</label><textarea id="tkBody" style="min-height:100px">${esc(edit?.body || "")}</textarea></div>
@@ -1291,7 +1465,17 @@ function taskModal(edit = null) {
       if (error) return alert("Save failed: " + error.message);
       taskId = edit.id;
     } else {
-      const { data, error } = await sb.from("tasks").insert({ ...rec, status: "progress", part: boardPart === ME.part || isExec() || ME.is_admin ? boardPart : ME.part, created_by: ME.id }).select("id").single();
+      const chosenCol = Number($("#tkBoardCol")?.value || 0);
+      const cell = boardAppendCell(window.__tasks || [], chosenCol);
+      const pos = boardCellToPos(cell.col, cell.row);
+      const { data, error } = await sb.from("tasks").insert({
+        ...rec,
+        status: "progress",
+        part: boardPart === ME.part || isExec() || ME.is_admin ? boardPart : ME.part,
+        created_by: ME.id,
+        pos_x: pos.x,
+        pos_y: pos.y,
+      }).select("id").single();
       if (error) return alert("Save failed: " + error.message);
       taskId = data.id;
     }
@@ -1341,7 +1525,8 @@ async function taskDetail(taskId) {
     <div class="modal-actions">
       ${canDelete ? `<button class="btn ghost" id="tkDel" style="color:var(--red)">Delete</button>` : ""}
       ${amInvolved ? `<button class="btn ghost" id="tkPlanBtn">📅 Create plan</button><button class="btn ghost" id="tkEdit">Edit</button>
-        ${t.status === "progress" ? `<button class="btn navy" id="tkDone">✔ Mark done</button>` : ""}` : ""}
+        ${t.status === "progress" ? `<button class="btn navy" id="tkDone">✔ Mark done</button>` : ""}
+        ${t.status === "done" ? `<button class="btn navy" id="tkReopen">↩ Reopen</button>` : ""}` : ""}
       <button class="btn ${amInvolved ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
   document.querySelectorAll("[data-ack]").forEach((b) => (b.onclick = async () => {
@@ -1361,8 +1546,17 @@ async function taskDetail(taskId) {
   $("#tkNewCmt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#tkCmtGo").click(); });
   if ($("#tkEdit")) $("#tkEdit").onclick = () => taskModal(t);
   if ($("#tkDone")) $("#tkDone").onclick = async () => {
-    await sb.from("tasks").update({ status: "done" }).eq("id", taskId);
-    closeModal(); renderBoard();
+    const { error } = await sb.from("tasks").update({ status: "done" }).eq("id", taskId);
+    if (error) return alert("Failed: " + error.message);
+    closeModal();
+    renderBoard();
+    showTaskUndoToast(taskId);
+  };
+  if ($("#tkReopen")) $("#tkReopen").onclick = async () => {
+    const { error } = await sb.from("tasks").update({ status: "progress" }).eq("id", taskId);
+    if (error) return alert("Reopen failed: " + error.message);
+    closeModal();
+    renderBoard();
   };
   if ($("#tkDel")) $("#tkDel").onclick = async () => {
     if (!confirm("Delete this task and all its comments?")) return;
