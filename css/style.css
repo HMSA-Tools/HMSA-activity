@@ -830,3 +830,89 @@ button.wb-comment-check {
     grid-row: 1 / span 2;
   }
 }
+
+
+/* ===== Workboard grid snap + undo ===== */
+.board-canvas {
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #f9fbfc;
+}
+.board-grid-surface {
+  position: relative;
+  box-sizing: border-box;
+  background:
+    repeating-linear-gradient(
+      to right,
+      transparent 0,
+      transparent 249px,
+      rgba(148, 163, 184, .16) 250px,
+      transparent 251px,
+      transparent 264px
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 151px,
+      rgba(148, 163, 184, .14) 152px,
+      transparent 153px,
+      transparent 166px
+    ),
+    #f9fbfc;
+}
+.board-grid-surface .tcard {
+  box-sizing: border-box;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.board-grid-surface .tcard.dragging {
+  opacity: .55;
+  transform: scale(.98);
+}
+.board-grid-surface .tcard-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  max-height: 55px;
+}
+.board-grid-surface .tcard-assignees {
+  min-height: 20px;
+  max-height: 38px;
+  overflow: hidden;
+  margin-bottom: 5px;
+}
+.board-grid-surface .tcard-foot {
+  margin-top: auto;
+}
+.task-undo-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px 10px 16px;
+  border-radius: 10px;
+  background: #172b3a;
+  color: #fff;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .24);
+  font-size: 13px;
+  font-weight: 650;
+}
+.task-undo-toast button {
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: #fff;
+  color: #173a4e;
+  font-weight: 800;
+  cursor: pointer;
+}
+.task-undo-toast button:hover {
+  background: #eef5f8;
+}
