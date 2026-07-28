@@ -866,10 +866,28 @@ button.wb-comment-check {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition:
+    left .18s cubic-bezier(.2, .8, .2, 1),
+    top .18s cubic-bezier(.2, .8, .2, 1),
+    transform .1s,
+    box-shadow .1s;
+  will-change: left, top;
 }
 .board-grid-surface .tcard.dragging {
   opacity: .55;
   transform: scale(.98);
+  transition: none;
+}
+.board-grid-surface.board-saving {
+  cursor: progress;
+}
+.board-grid-surface.board-saving .tcard {
+  cursor: wait;
+}
+@media (prefers-reduced-motion: reduce) {
+  .board-grid-surface .tcard {
+    transition: none;
+  }
 }
 .board-grid-surface .tcard-title {
   display: -webkit-box;
@@ -915,4 +933,127 @@ button.wb-comment-check {
 }
 .task-undo-toast button:hover {
   background: #eef5f8;
+}
+
+
+/* ===== Workboard realtime presence + live collaboration ===== */
+.board-realtime-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  max-width: 390px;
+  padding: 5px 8px;
+  border: 1px solid rgba(16, 185, 129, .22);
+  border-radius: 999px;
+  background: rgba(236, 253, 245, .78);
+  color: #24624a;
+  font-size: 11.5px;
+  line-height: 1;
+}
+.board-realtime-status.offline {
+  border-color: rgba(148, 163, 184, .28);
+  background: #f5f7f9;
+  color: #71808e;
+}
+.board-live-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, .13);
+}
+.board-realtime-status.offline .board-live-dot {
+  background: #9aa6b2;
+  box-shadow: none;
+}
+.board-viewers {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.board-viewing-label {
+  white-space: nowrap;
+  font-weight: 700;
+}
+.board-viewer-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 96px;
+  padding: 3px 7px;
+  border: 1px solid color-mix(in srgb, var(--viewer-color) 50%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--viewer-color) 13%, white);
+  color: #253744;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-grid-surface .tcard.remote-held {
+  border-color: var(--remote-color) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--remote-color) 25%, transparent), 0 8px 20px rgba(15, 23, 42, .14);
+}
+.remote-mover-label {
+  position: absolute;
+  z-index: 8;
+  top: 35px;
+  right: 7px;
+  max-width: calc(100% - 14px);
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--remote-color) 88%, #172b3a);
+  color: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, .16);
+  font-size: 10.5px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.board-grid-surface .tcard.realtime-moved {
+  animation: workboardRealtimePulse .5s ease-out;
+}
+@keyframes workboardRealtimePulse {
+  0% { box-shadow: 0 0 0 0 rgba(46, 124, 246, .32); }
+  55% { box-shadow: 0 0 0 6px rgba(46, 124, 246, .12); }
+  100% { box-shadow: 0 1px 3px rgba(10, 42, 67, .08); }
+}
+.realtime-card-exit {
+  opacity: 0 !important;
+  transform: scale(.96) !important;
+  transition: opacity .18s ease, transform .18s ease !important;
+}
+.workboard-event-toast {
+  --event-color: #2e7cf6;
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 9998;
+  max-width: min(420px, calc(100vw - 48px));
+  padding: 10px 14px;
+  border-left: 4px solid var(--event-color);
+  border-radius: 9px;
+  background: #172b3a;
+  color: #fff;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .22);
+  font-size: 12.5px;
+  font-weight: 700;
+  animation: workboardToastIn .18s ease-out;
+}
+@keyframes workboardToastIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (max-width: 1180px) {
+  .board-realtime-status { max-width: 250px; }
+  .board-viewer-chip:nth-of-type(n+4) { display: none; }
+}
+@media (max-width: 760px) {
+  .board-realtime-status { order: 20; width: 100%; max-width: none; margin-left: 0 !important; }
+  .workboard-event-toast { right: 14px; bottom: 14px; max-width: calc(100vw - 28px); }
 }
