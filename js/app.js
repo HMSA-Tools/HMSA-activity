@@ -880,6 +880,20 @@ const BOARD_GAP_Y = 14;
 const BOARD_PAD = 12;
 let taskUndoTimer = null;
 
+// Workboard Realtime: Presence shows who is viewing / dragging, while
+// Broadcast and Postgres Changes keep card position and status synchronized.
+let workboardChannel = null;
+let workboardChannelPart = null;
+let workboardRealtimeConnected = false;
+let workboardPresencePeople = [];
+let workboardLocalDragTaskId = null;
+let workboardLocalMoveSaving = false;
+let workboardLocalSavingIds = new Set();
+let workboardDeferredEvents = [];
+let workboardTaskVersions = new Map();
+let workboardDbFallbackGroups = new Map();
+let workboardEventToastTimer = null;
+
 const boardCellKey = (col, row) => `${col}:${row}`;
 const boardCellToPos = (col, row) => ({
   x: BOARD_PAD + col * (BOARD_CARD_W + BOARD_GAP_X),
@@ -953,6 +967,423 @@ function boardAppendCell(allTasks, columnIndex) {
   return { col, row: maxRow + 1 };
 }
 
+
+function workboardVersionMs(value) {
+  const ms = value ? Date.parse(value) : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function workboardTaskVersion(taskId) {
+  return workboardTaskVersions.get(Number(taskId)) || 0;
+}
+
+function workboardRememberVersion(taskId, changedAt) {
+  const ms = workboardVersionMs(changedAt);
+  if (ms) workboardTaskVersions.set(Number(taskId), Math.max(workboardTaskVersion(taskId), ms));
+}
+
+function workboardShouldShowTask(task) {
+  if (!task) return false;
+  if (task.status === "done" && !boardShow.done) return false;
+  if (task.status === "canceled" && !boardShow.canceled) return false;
+  if (boardCoFilter && !(task.task_companies || []).some((c) => Number(c.company_id) === Number(boardCoFilter))) return false;
+  return true;
+}
+
+function workboardActorName(actorId, fallback = "Someone") {
+  return STAFF.find((s) => Number(s.id) === Number(actorId))?.name || fallback;
+}
+
+function showWorkboardEventToast(message, actorId = null) {
+  document.querySelectorAll(".workboard-event-toast").forEach((el) => el.remove());
+  if (workboardEventToastTimer) clearTimeout(workboardEventToastTimer);
+  const toast = document.createElement("div");
+  toast.className = "workboard-event-toast";
+  if (actorId) toast.style.setProperty("--event-color", staffColor(Number(actorId)));
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  workboardEventToastTimer = setTimeout(() => toast.remove(), 3600);
+}
+
+function workboardPresencePayload(movingTaskId = null) {
+  return {
+    staff_id: Number(ME.id),
+    name: ME.name,
+    part: boardPart,
+    color: staffColor(ME.id),
+    moving_task_id: movingTaskId ? Number(movingTaskId) : null,
+    online_at: new Date().toISOString(),
+  };
+}
+
+async function trackWorkboardPresence(movingTaskId = null) {
+  if (!workboardChannel || !workboardRealtimeConnected || currentView !== "board") return;
+  try {
+    await workboardChannel.track(workboardPresencePayload(movingTaskId));
+  } catch (error) {
+    console.warn("Workboard presence track failed", error);
+  }
+}
+
+function renderWorkboardPresence() {
+  const status = $("#boardRealtimeStatus");
+  const viewerBox = $("#boardViewers");
+  if (status) status.classList.toggle("offline", !workboardRealtimeConnected);
+
+  const byStaff = new Map();
+  (workboardPresencePeople || []).forEach((person) => {
+    const id = Number(person.staff_id);
+    if (!id) return;
+    const prior = byStaff.get(id);
+    if (!prior || person.moving_task_id) byStaff.set(id, person);
+  });
+  const people = [...byStaff.values()].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
+  if (viewerBox) {
+    viewerBox.innerHTML = workboardRealtimeConnected
+      ? (people.length
+        ? `<span class="board-viewing-label">Viewing now:</span>${people.map((p) => `<span class="board-viewer-chip" style="--viewer-color:${esc(p.color || staffColor(p.staff_id))}">${esc(p.name || staffName(p.staff_id))}</span>`).join("")}`
+        : `<span class="board-viewing-label">Viewing now: you</span>`)
+      : `<span class="board-viewing-label">Realtime reconnecting…</span>`;
+  }
+
+  document.querySelectorAll("#boardGridSurface .tcard").forEach((card) => {
+    card.classList.remove("remote-held");
+    card.style.removeProperty("--remote-color");
+    card.querySelectorAll(".remote-mover-label").forEach((el) => el.remove());
+  });
+
+  const movingByTask = new Map();
+  people.forEach((p) => {
+    const taskId = Number(p.moving_task_id);
+    if (!taskId || Number(p.staff_id) === Number(ME.id)) return;
+    if (!movingByTask.has(taskId)) movingByTask.set(taskId, []);
+    movingByTask.get(taskId).push(p);
+  });
+
+  movingByTask.forEach((movers, taskId) => {
+    const card = document.querySelector(`#boardGridSurface [data-task="${taskId}"]`);
+    if (!card) return;
+    const color = movers[0]?.color || staffColor(movers[0]?.staff_id);
+    const names = movers.map((p) => p.name || staffName(p.staff_id)).join(", ");
+    card.classList.add("remote-held");
+    card.style.setProperty("--remote-color", color);
+    const label = document.createElement("div");
+    label.className = "remote-mover-label";
+    label.textContent = `${names} moving…`;
+    card.appendChild(label);
+  });
+}
+
+function updateWorkboardPresenceFromChannel() {
+  if (!workboardChannel) return;
+  const state = workboardChannel.presenceState() || {};
+  workboardPresencePeople = Object.values(state).flat().filter((p) => p && p.part === workboardChannelPart);
+  renderWorkboardPresence();
+}
+
+async function stopWorkboardRealtime() {
+  const channel = workboardChannel;
+  workboardChannel = null;
+  workboardChannelPart = null;
+  workboardRealtimeConnected = false;
+  workboardPresencePeople = [];
+  renderWorkboardPresence();
+  if (!channel) return;
+  try { await channel.untrack(); } catch (_) {}
+  try { await sb.removeChannel(channel); } catch (_) {
+    try { await channel.unsubscribe(); } catch (__) {}
+  }
+}
+
+function workboardRebuildOccupied() {
+  const layout = window.__boardLayout;
+  if (!layout) return;
+  layout.occupied.clear();
+  layout.cells.forEach((cell, id) => layout.occupied.set(boardCellKey(cell.col, cell.row), Number(id)));
+}
+
+function workboardResizeSurface() {
+  const surface = $("#boardGridSurface");
+  const layout = window.__boardLayout;
+  if (!surface || !layout) return;
+  let maxRow = 0;
+  layout.cells.forEach((cell) => { maxRow = Math.max(maxRow, Number(cell.row) || 0); });
+  const height = Math.max(560, BOARD_PAD * 2 + (maxRow + 1) * BOARD_CARD_H + maxRow * BOARD_GAP_Y + 120);
+  surface.style.minHeight = `${height}px`;
+}
+
+function workboardUpdateTaskData(taskId, patch) {
+  const task = (window.__tasks || []).find((t) => Number(t.id) === Number(taskId));
+  if (!task) return null;
+  Object.assign(task, patch || {});
+  return task;
+}
+
+function workboardUpdateCardStatus(task, { allowRenderFallback = true } = {}) {
+  if (!task || currentView !== "board") return;
+  const visible = workboardShouldShowTask(task);
+
+  if (boardView === "list") {
+    const row = document.querySelector(`.workboard-list-table [data-task="${task.id}"]`);
+    if (!visible && row) {
+      row.classList.add("realtime-card-exit");
+      setTimeout(() => row.remove(), 190);
+      return;
+    }
+    if (!row) {
+      if (visible && allowRenderFallback) renderBoard();
+      return;
+    }
+    row.style.opacity = task.status === "canceled" ? ".5" : "";
+    row.style.textDecoration = task.status === "canceled" ? "line-through" : "";
+    const statusCell = row.children[5];
+    if (statusCell) statusCell.innerHTML = `<span class="badge ${task.status === "done" ? "approved" : task.status === "canceled" ? "returned" : "submitted"}">${TASK_ST[task.status]}</span>`;
+    return;
+  }
+
+  const card = document.querySelector(`#boardGridSurface [data-task="${task.id}"]`);
+  if (!visible && card) {
+    card.classList.add("realtime-card-exit");
+    setTimeout(() => card.remove(), 190);
+    return;
+  }
+  if (!card) {
+    if (visible && allowRenderFallback) renderBoard();
+    return;
+  }
+
+  const over = task.due_date && task.status === "progress" && task.due_date < new Date().toISOString().slice(0, 10);
+  card.classList.toggle("dead", task.status === "canceled");
+  card.classList.toggle("overdue", Boolean(over));
+  card.style.background = cardBG(task);
+
+  card.querySelectorAll(".tcard-wm").forEach((el) => el.remove());
+  const wmWrap = document.createElement("div");
+  wmWrap.innerHTML = wmHTML(task);
+  if (wmWrap.firstElementChild) card.insertBefore(wmWrap.firstElementChild, card.firstChild);
+
+  const leftTop = card.querySelector(".tcard-top > span:first-child");
+  if (leftTop) {
+    leftTop.innerHTML = `${task.amount !== null && task.amount !== undefined && task.amount !== "" ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(task.amount)}</span>` : ""}${task.status === "done" ? `<span class="imp low" style="background:#d9f7d9;color:var(--green-dark)">✔ DONE</span>` : ""}`;
+  }
+}
+
+function workboardApplyMoveEvent(payload, { fallback = false } = {}) {
+  if (!payload || currentView !== "board" || payload.part !== boardPart) return;
+  const changedAt = payload.changed_at || payload.realtime_updated_at;
+  const revision = workboardVersionMs(changedAt);
+  const moves = Array.isArray(payload.moves) ? payload.moves : [];
+  if (!revision || !moves.length) return;
+
+  const overlapsLocal = moves.some((m) => Number(m.id) === Number(workboardLocalDragTaskId) || workboardLocalSavingIds.has(Number(m.id)));
+  if (overlapsLocal) {
+    workboardDeferredEvents.push({ type: "move", payload, fallback });
+    return;
+  }
+
+  const layout = window.__boardLayout;
+  const surface = $("#boardGridSurface");
+  const applied = [];
+  moves.forEach((move) => {
+    const id = Number(move.id);
+    if (!id || revision <= workboardTaskVersion(id)) return;
+    const x = Number(move.x);
+    const y = Number(move.y);
+    const task = workboardUpdateTaskData(id, {
+      pos_x: x,
+      pos_y: y,
+      realtime_updated_at: changedAt,
+      realtime_updated_by: payload.actor_id || null,
+    });
+    workboardRememberVersion(id, changedAt);
+    if (layout) layout.cells.set(id, boardPosToCell({ pos_x: x, pos_y: y }));
+    const card = document.querySelector(`#boardGridSurface [data-task="${id}"]`);
+    if (card && surface) {
+      card.style.left = `${x}px`;
+      card.style.top = `${y}px`;
+      const cell = boardPosToCell({ pos_x: x, pos_y: y });
+      card.dataset.col = String(cell.col);
+      card.dataset.row = String(cell.row);
+      card.classList.add("realtime-moved");
+      setTimeout(() => card.classList.remove("realtime-moved"), 520);
+    }
+    if (task) applied.push(id);
+  });
+
+  if (!applied.length) return;
+  workboardRebuildOccupied();
+  workboardResizeSurface();
+  renderWorkboardPresence();
+
+  if (Number(payload.actor_id) !== Number(ME.id)) {
+    const title = payload.title || (window.__tasks || []).find((t) => Number(t.id) === Number(payload.dragged_task_id))?.title || "a task";
+    showWorkboardEventToast(`${workboardActorName(payload.actor_id, payload.actor_name)} moved “${title}”`, payload.actor_id);
+  }
+}
+
+function workboardApplyStatusEvent(payload, { fallback = false } = {}) {
+  if (!payload || currentView !== "board" || payload.part !== boardPart) return;
+  const id = Number(payload.task_id || payload.id);
+  const changedAt = payload.changed_at || payload.realtime_updated_at;
+  const revision = workboardVersionMs(changedAt);
+  if (!id || !revision || revision <= workboardTaskVersion(id)) return;
+
+  if (Number(workboardLocalDragTaskId) === id || workboardLocalSavingIds.has(id)) {
+    workboardDeferredEvents.push({ type: "status", payload, fallback });
+    return;
+  }
+
+  const task = workboardUpdateTaskData(id, {
+    status: payload.status,
+    realtime_updated_at: changedAt,
+    realtime_updated_by: payload.actor_id || null,
+  });
+  workboardRememberVersion(id, changedAt);
+  if (!task) {
+    if (fallback) renderBoard();
+    return;
+  }
+  workboardUpdateCardStatus(task);
+
+  if (Number(payload.actor_id) !== Number(ME.id)) {
+    const verb = payload.status === "done" ? "marked as done" : payload.status === "progress" ? "reopened" : "canceled";
+    showWorkboardEventToast(`${workboardActorName(payload.actor_id, payload.actor_name)} ${verb} “${task.title}”`, payload.actor_id);
+  }
+}
+
+function flushWorkboardDeferredEvents() {
+  if (workboardLocalDragTaskId || workboardLocalMoveSaving || workboardLocalSavingIds.size) return;
+  const queued = workboardDeferredEvents.splice(0);
+  queued.sort((a, b) => workboardVersionMs(a.payload?.changed_at) - workboardVersionMs(b.payload?.changed_at));
+  queued.forEach((event) => {
+    if (event.type === "move") workboardApplyMoveEvent(event.payload, { fallback: event.fallback });
+    else workboardApplyStatusEvent(event.payload, { fallback: event.fallback });
+  });
+}
+
+function queueWorkboardDbFallback(row) {
+  if (!row || !row.realtime_updated_at || row.part !== boardPart) return;
+  const revision = row.realtime_updated_at;
+  let group = workboardDbFallbackGroups.get(revision);
+  if (!group) {
+    group = { rows: new Map(), timer: null };
+    workboardDbFallbackGroups.set(revision, group);
+  }
+  group.rows.set(Number(row.id), row);
+  clearTimeout(group.timer);
+  group.timer = setTimeout(() => {
+    workboardDbFallbackGroups.delete(revision);
+    const rows = [...group.rows.values()];
+    const actorId = rows[0]?.realtime_updated_by || null;
+    const positionRows = rows.filter((r) => {
+      const current = (window.__tasks || []).find((t) => Number(t.id) === Number(r.id));
+      return current
+        && Number.isFinite(Number(r.pos_x))
+        && Number.isFinite(Number(r.pos_y))
+        && (Number(current.pos_x) !== Number(r.pos_x) || Number(current.pos_y) !== Number(r.pos_y));
+    });
+    if (positionRows.length) {
+      workboardApplyMoveEvent({
+        part: rows[0].part,
+        actor_id: actorId,
+        actor_name: workboardActorName(actorId),
+        dragged_task_id: positionRows[0].id,
+        title: (window.__tasks || []).find((t) => Number(t.id) === Number(positionRows[0].id))?.title,
+        changed_at: revision,
+        moves: positionRows.map((r) => ({ id: r.id, x: r.pos_x, y: r.pos_y })),
+      }, { fallback: true });
+    }
+    rows.forEach((r) => {
+      const current = (window.__tasks || []).find((t) => Number(t.id) === Number(r.id));
+      if (current && current.status !== r.status) {
+        workboardApplyStatusEvent({
+          part: r.part,
+          actor_id: actorId,
+          actor_name: workboardActorName(actorId),
+          task_id: r.id,
+          status: r.status,
+          changed_at: revision,
+        }, { fallback: true });
+      }
+    });
+  }, 260);
+}
+
+async function broadcastWorkboard(event, payload) {
+  if (!workboardChannel || !workboardRealtimeConnected || workboardChannelPart !== boardPart) return;
+  try {
+    await workboardChannel.send({ type: "broadcast", event, payload });
+  } catch (error) {
+    console.warn("Workboard broadcast failed", error);
+  }
+}
+
+async function ensureWorkboardRealtime(part) {
+  if (!ME || currentView !== "board" || !part) return;
+  if (workboardChannel && workboardChannelPart === part) {
+    renderWorkboardPresence();
+    await trackWorkboardPresence(workboardLocalDragTaskId);
+    return;
+  }
+
+  await stopWorkboardRealtime();
+  workboardChannelPart = part;
+  const channel = sb.channel(`workboard:${encodeURIComponent(part)}`, {
+    config: {
+      presence: { key: String(ME.id) },
+      broadcast: { self: false, ack: true },
+    },
+  });
+  workboardChannel = channel;
+
+  channel
+    .on("presence", { event: "sync" }, updateWorkboardPresenceFromChannel)
+    .on("presence", { event: "join" }, updateWorkboardPresenceFromChannel)
+    .on("presence", { event: "leave" }, updateWorkboardPresenceFromChannel)
+    .on("broadcast", { event: "board-move" }, ({ payload }) => workboardApplyMoveEvent(payload || {}))
+    .on("broadcast", { event: "task-status" }, ({ payload }) => workboardApplyStatusEvent(payload || {}))
+    .on("postgres_changes", {
+      event: "UPDATE",
+      schema: "public",
+      table: "tasks",
+      filter: `part=eq.${part}`,
+    }, ({ new: row }) => queueWorkboardDbFallback(row));
+
+  channel.subscribe(async (status) => {
+    if (workboardChannel !== channel) return;
+    workboardRealtimeConnected = status === "SUBSCRIBED";
+    renderWorkboardPresence();
+    if (status === "SUBSCRIBED") await trackWorkboardPresence(workboardLocalDragTaskId);
+  });
+}
+
+async function setWorkboardTaskStatus(taskId, status) {
+  const { data, error } = await sb.rpc("set_workboard_task_status", {
+    p_task_id: Number(taskId),
+    p_status: status,
+  });
+  if (error) return { error };
+
+  const changedAt = data?.changed_at || new Date().toISOString();
+  const task = workboardUpdateTaskData(taskId, {
+    status,
+    realtime_updated_at: changedAt,
+    realtime_updated_by: ME.id,
+  });
+  workboardRememberVersion(taskId, changedAt);
+  if (task) workboardUpdateCardStatus(task, { allowRenderFallback: false });
+  await broadcastWorkboard("task-status", {
+    part: task?.part || boardPart,
+    actor_id: ME.id,
+    actor_name: ME.name,
+    task_id: Number(taskId),
+    status,
+    changed_at: changedAt,
+  });
+  return { data, task };
+}
+
 function showTaskUndoToast(taskId) {
   document.querySelectorAll('.task-undo-toast').forEach((el) => el.remove());
   if (taskUndoTimer) clearTimeout(taskUndoTimer);
@@ -963,11 +1394,10 @@ function showTaskUndoToast(taskId) {
   document.body.appendChild(toast);
 
   toast.querySelector('button').onclick = async () => {
-    const { error } = await sb.from('tasks').update({ status: 'progress' }).eq('id', taskId);
+    const { error } = await setWorkboardTaskStatus(taskId, 'progress');
     if (error) return alert('Undo failed: ' + error.message);
     toast.remove();
     if (taskUndoTimer) clearTimeout(taskUndoTimer);
-    if (currentView === 'board') renderBoard();
   };
 
   taskUndoTimer = setTimeout(() => toast.remove(), 8000);
@@ -993,6 +1423,7 @@ function wmHTML(t) {
 
 async function renderBoard() {
   if (!boardPart) boardPart = ME.part;
+  if (workboardChannelPart && workboardChannelPart !== boardPart) await stopWorkboardRealtime();
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Workboard</div>
     <div class="page-sub">Drag cards anywhere — the layout is shared. Watermark fill shows status: half = in progress, full green = done, gray = canceled. Card color = assignees' colors.</div>
@@ -1008,7 +1439,10 @@ async function renderBoard() {
       </select>
       <label style="font-size:12px"><input type="checkbox" id="bShowDone" ${boardShow.done ? "checked" : ""}/> Done</label>
       <label style="font-size:12px"><input type="checkbox" id="bShowCx" ${boardShow.canceled ? "checked" : ""}/> Canceled</label>
-      ${isManager() ? `<button class="btn ghost sm" id="btnColors" style="margin-left:auto">🎨 Member colors</button>` : `<span style="margin-left:auto"></span>`}
+      <div id="boardRealtimeStatus" class="board-realtime-status offline" style="margin-left:auto">
+        <span class="board-live-dot"></span><span id="boardViewers" class="board-viewers"><span class="board-viewing-label">Realtime connecting…</span></span>
+      </div>
+      ${isManager() ? `<button class="btn ghost sm" id="btnColors">🎨 Member colors</button>` : ``}
       <button class="btn" id="btnNewTask">+ New task</button>
     </div>
     <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>`;
@@ -1037,6 +1471,8 @@ async function renderBoard() {
   const boardLayout = buildBoardLayout(allTasks);
   window.__tasks = allTasks;
   window.__boardLayout = boardLayout;
+  workboardTaskVersions.clear();
+  allTasks.forEach((task) => workboardRememberVersion(task.id, task.realtime_updated_at));
   if (!$("#boardCanvas")) return;
 
   tasks = tasks.filter((t) => (t.status !== "done" || boardShow.done) && (t.status !== "canceled" || boardShow.canceled));
@@ -1105,6 +1541,7 @@ async function renderBoard() {
       if (error) return alert("Failed: " + error.message);
       renderBoard();
     }));
+    await ensureWorkboardRealtime(boardPart);
     return;
   }
 
@@ -1155,13 +1592,20 @@ async function renderBoard() {
   document.querySelectorAll("#boardGridSurface [data-task]").forEach((el) => {
     el.addEventListener("dragstart", (e) => {
       dragEl = el;
+      workboardLocalDragTaskId = Number(el.dataset.task);
       const r = el.getBoundingClientRect();
       dx = e.clientX - r.left;
       dy = e.clientY - r.top;
       e.dataTransfer.effectAllowed = "move";
       el.classList.add("dragging");
+      trackWorkboardPresence(workboardLocalDragTaskId);
     });
-    el.addEventListener("dragend", () => el.classList.remove("dragging"));
+    el.addEventListener("dragend", () => {
+      el.classList.remove("dragging");
+      workboardLocalDragTaskId = null;
+      trackWorkboardPresence(null);
+      setTimeout(flushWorkboardDeferredEvents, 80);
+    });
   });
 
   surface.addEventListener("dragover", (e) => {
@@ -1169,9 +1613,11 @@ async function renderBoard() {
     e.dataTransfer.dropEffect = "move";
   });
 
+  let moveSaving = false;
+
   surface.addEventListener("drop", async (e) => {
     e.preventDefault();
-    if (!dragEl) return;
+    if (!dragEl || moveSaving) return;
 
     const draggedId = Number(dragEl.dataset.task);
     const sr = surface.getBoundingClientRect();
@@ -1201,7 +1647,24 @@ async function renderBoard() {
       row += 1;
     }
 
+    const originalDraggedCell = currentCells.get(draggedId);
+    const onlyDraggedCardChanged = changed.size === 1;
+    const droppedInSameCell = onlyDraggedCardChanged
+      && originalDraggedCell
+      && originalDraggedCell.col === targetCol
+      && originalDraggedCell.row === targetRow;
+
+    dragEl.classList.remove("dragging");
+    dragEl = null;
+
+    if (droppedInSameCell) return;
+
+    const previousSurfaceHeight = surface.style.minHeight;
+
+    // Optimistic UI: move cards immediately and animate them into place.
+    // The board is NOT re-rendered after a successful save.
     changed.forEach((cell, id) => {
+      boardLayout.cells.set(Number(id), { ...cell });
       const el = document.querySelector(`#boardGridSurface [data-task="${id}"]`);
       if (!el) return;
       const pos = boardCellToPos(cell.col, cell.row);
@@ -1211,29 +1674,84 @@ async function renderBoard() {
       el.dataset.row = String(cell.row);
     });
 
+    boardLayout.occupied.clear();
+    boardLayout.cells.forEach((cell, id) => {
+      boardLayout.occupied.set(boardCellKey(cell.col, cell.row), Number(id));
+    });
+
     const requiredH = Math.max(surfaceH, BOARD_PAD * 2 + (row + 1) * BOARD_CARD_H + row * BOARD_GAP_Y + 120);
     surface.style.minHeight = requiredH + "px";
-    dragEl.classList.remove("dragging");
-    dragEl = null;
 
     const moves = [...changed.entries()].map(([id, cell]) => {
       const pos = boardCellToPos(cell.col, cell.row);
       return { id, x: pos.x, y: pos.y };
     });
 
-    const { error } = await sb.rpc("move_workboard_cards", {
-      p_dragged_task_id: draggedId,
-      p_moves: moves,
-    });
-    if (error) {
-      alert("Position not saved: " + error.message);
-      renderBoard();
-      return;
+    moveSaving = true;
+    workboardLocalMoveSaving = true;
+    workboardLocalSavingIds = new Set(moves.map((move) => Number(move.id)));
+    surface.classList.add("board-saving");
+
+    try {
+      const { data, error } = await sb.rpc("move_workboard_cards", {
+        p_dragged_task_id: draggedId,
+        p_moves: moves,
+      });
+
+      if (error) throw error;
+      const changedAt = data?.changed_at || new Date().toISOString();
+      moves.forEach((move) => {
+        workboardUpdateTaskData(move.id, {
+          pos_x: move.x,
+          pos_y: move.y,
+          realtime_updated_at: changedAt,
+          realtime_updated_by: ME.id,
+        });
+        workboardRememberVersion(move.id, changedAt);
+      });
+      await broadcastWorkboard("board-move", {
+        part: boardPart,
+        actor_id: ME.id,
+        actor_name: ME.name,
+        dragged_task_id: draggedId,
+        title: (window.__tasks || []).find((task) => Number(task.id) === draggedId)?.title || "a task",
+        changed_at: changedAt,
+        moves,
+      });
+      // No renderBoard() here. Keeping the current DOM prevents the
+      // refresh-like flash and preserves the user's scroll position.
+    } catch (error) {
+      // Save failed: return only the affected cards to their prior cells.
+      changed.forEach((cell, id) => {
+        const previousCell = currentCells.get(Number(id));
+        if (!previousCell) return;
+        boardLayout.cells.set(Number(id), { ...previousCell });
+        const el = document.querySelector(`#boardGridSurface [data-task="${id}"]`);
+        if (!el) return;
+        const pos = boardCellToPos(previousCell.col, previousCell.row);
+        el.style.left = pos.x + "px";
+        el.style.top = pos.y + "px";
+        el.dataset.col = String(previousCell.col);
+        el.dataset.row = String(previousCell.row);
+      });
+
+      boardLayout.occupied.clear();
+      boardLayout.cells.forEach((cell, id) => {
+        boardLayout.occupied.set(boardCellKey(cell.col, cell.row), Number(id));
+      });
+      surface.style.minHeight = previousSurfaceHeight;
+      alert("Position not saved: " + (error?.message || error));
+    } finally {
+      moveSaving = false;
+      workboardLocalMoveSaving = false;
+      workboardLocalSavingIds.clear();
+      surface.classList.remove("board-saving");
+      flushWorkboardDeferredEvents();
     }
-    renderBoard();
   });
 
-
+  await ensureWorkboardRealtime(boardPart);
+  renderWorkboardPresence();
 }
 
 function rightWidgetPart() {
@@ -1546,17 +2064,15 @@ async function taskDetail(taskId) {
   $("#tkNewCmt").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#tkCmtGo").click(); });
   if ($("#tkEdit")) $("#tkEdit").onclick = () => taskModal(t);
   if ($("#tkDone")) $("#tkDone").onclick = async () => {
-    const { error } = await sb.from("tasks").update({ status: "done" }).eq("id", taskId);
+    const { error } = await setWorkboardTaskStatus(taskId, "done");
     if (error) return alert("Failed: " + error.message);
     closeModal();
-    renderBoard();
     showTaskUndoToast(taskId);
   };
   if ($("#tkReopen")) $("#tkReopen").onclick = async () => {
-    const { error } = await sb.from("tasks").update({ status: "progress" }).eq("id", taskId);
+    const { error } = await setWorkboardTaskStatus(taskId, "progress");
     if (error) return alert("Reopen failed: " + error.message);
     closeModal();
-    renderBoard();
   };
   if ($("#tkDel")) $("#tkDel").onclick = async () => {
     if (!confirm("Delete this task and all its comments?")) return;
@@ -1818,7 +2334,7 @@ async function doSignup() {
   await afterLogin();
 }
 
-async function doLogout() { await sb.auth.signOut(); location.reload(); }
+async function doLogout() { await stopWorkboardRealtime(); await sb.auth.signOut(); location.reload(); }
 
 async function afterLogin() {
   const { data: { user } } = await sb.auth.getUser();
@@ -1875,6 +2391,8 @@ function pwModal() {
    VIEW ROUTER
    ========================================================= */
 async function switchView(v) {
+  const leavingBoard = currentView === "board" && v !== "board";
+  if (leavingBoard) await stopWorkboardRealtime();
   currentView = v; openedReportId = null;
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
   charts.forEach((c) => c.destroy()); charts = [];
