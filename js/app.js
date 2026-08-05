@@ -871,14 +871,23 @@ const amountTxt = (a) => (a === null || a === undefined || a === "" ? "" : `$${N
 // Workboard grid: Windows-icon style snap layout.
 // Blank cells stay blank when a card is moved away. Dropping on an occupied
 // cell pushes only that column downward, so the team's manual column meaning
-// is preserved.
-const BOARD_COLS = 4;
+// is preserved. Columns are shared, named, and can grow horizontally.
+const BOARD_DEFAULT_COLS = 4;
 const BOARD_CARD_W = 250;
 const BOARD_CARD_H = 152;
 const BOARD_GAP_X = 14;
 const BOARD_GAP_Y = 14;
 const BOARD_PAD = 12;
+let workboardColumns = [];
+let workboardColumnRefreshTimer = null;
 let taskUndoTimer = null;
+
+const boardColumnCount = () => Math.max(1, workboardColumns.length || BOARD_DEFAULT_COLS);
+const boardColumnName = (index) => workboardColumns[index]?.name || `Column ${index + 1}`;
+const boardRawPosToCell = (task) => ({
+  col: Math.max(0, Math.round((Number(task.pos_x) - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X))),
+  row: Math.max(0, Math.round((Number(task.pos_y) - BOARD_PAD) / (BOARD_CARD_H + BOARD_GAP_Y))),
+});
 
 // Workboard Realtime: Presence shows who is viewing / dragging, while
 // Broadcast and Postgres Changes keep card position and status synchronized.
@@ -899,10 +908,10 @@ const boardCellToPos = (col, row) => ({
   x: BOARD_PAD + col * (BOARD_CARD_W + BOARD_GAP_X),
   y: BOARD_PAD + row * (BOARD_CARD_H + BOARD_GAP_Y),
 });
-const boardPosToCell = (task) => ({
-  col: Math.max(0, Math.min(BOARD_COLS - 1, Math.round((Number(task.pos_x) - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X)))),
-  row: Math.max(0, Math.round((Number(task.pos_y) - BOARD_PAD) / (BOARD_CARD_H + BOARD_GAP_Y))),
-});
+const boardPosToCell = (task) => {
+  const raw = boardRawPosToCell(task);
+  return { col: Math.max(0, Math.min(boardColumnCount() - 1, raw.col)), row: raw.row };
+};
 const hasBoardPosition = (task) => task.pos_x !== null && task.pos_x !== undefined && task.pos_x !== ""
   && task.pos_y !== null && task.pos_y !== undefined && task.pos_y !== ""
   && Number.isFinite(Number(task.pos_x)) && Number.isFinite(Number(task.pos_y));
@@ -941,7 +950,7 @@ function buildBoardLayout(allTasks) {
     let col = 0;
     let found = false;
     while (!found) {
-      for (col = 0; col < BOARD_COLS; col += 1) {
+      for (col = 0; col < boardColumnCount(); col += 1) {
         if (!occupied.has(boardCellKey(col, row))) {
           found = true;
           break;
@@ -958,7 +967,7 @@ function buildBoardLayout(allTasks) {
 }
 
 function boardAppendCell(allTasks, columnIndex) {
-  const col = Math.max(0, Math.min(BOARD_COLS - 1, Number(columnIndex) || 0));
+  const col = Math.max(0, Math.min(boardColumnCount() - 1, Number(columnIndex) || 0));
   const layout = buildBoardLayout(allTasks || []);
   let maxRow = -1;
   layout.cells.forEach((cell) => {
@@ -1155,17 +1164,19 @@ function workboardUpdateCardStatus(task, { allowRenderFallback = true } = {}) {
 
   const over = task.due_date && task.status === "progress" && task.due_date < new Date().toISOString().slice(0, 10);
   card.classList.toggle("dead", task.status === "canceled");
+  card.classList.toggle("is-canceled", task.status === "canceled");
+  card.classList.toggle("is-done", task.status === "done");
   card.classList.toggle("overdue", Boolean(over));
   card.style.background = cardBG(task);
 
-  card.querySelectorAll(".tcard-wm").forEach((el) => el.remove());
-  const wmWrap = document.createElement("div");
-  wmWrap.innerHTML = wmHTML(task);
-  if (wmWrap.firstElementChild) card.insertBefore(wmWrap.firstElementChild, card.firstChild);
+  card.querySelectorAll(".tcard-wm, .task-status-stamp").forEach((el) => el.remove());
+  const overlayWrap = document.createElement("div");
+  overlayWrap.innerHTML = `${wmHTML(task)}${taskStatusStampHTML(task)}`;
+  [...overlayWrap.children].reverse().forEach((child) => card.insertBefore(child, card.firstChild));
 
   const leftTop = card.querySelector(".tcard-top > span:first-child");
   if (leftTop) {
-    leftTop.innerHTML = `${task.amount !== null && task.amount !== undefined && task.amount !== "" ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(task.amount)}</span>` : ""}${task.status === "done" ? `<span class="imp low" style="background:#d9f7d9;color:var(--green-dark)">✔ DONE</span>` : ""}`;
+    leftTop.innerHTML = `${task.amount !== null && task.amount !== undefined && task.amount !== "" ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(task.amount)}</span>` : ""}`;
   }
 }
 
@@ -1348,7 +1359,13 @@ async function ensureWorkboardRealtime(part) {
       schema: "public",
       table: "tasks",
       filter: `part=eq.${part}`,
-    }, ({ new: row }) => queueWorkboardDbFallback(row));
+    }, ({ new: row }) => queueWorkboardDbFallback(row))
+    .on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table: "workboard_columns",
+      filter: `part=eq.${part}`,
+    }, () => scheduleWorkboardColumnRefresh());
 
   channel.subscribe(async (status) => {
     if (workboardChannel !== channel) return;
@@ -1404,7 +1421,8 @@ function showTaskUndoToast(taskId) {
 }
 
 function cardBG(t) {
-  if (t.status === "canceled") return "#e9ecef";
+  if (t.status === "canceled") return "#e4e7ea";
+  if (t.status === "done") return "#eef0ef";
   const cols = (t.task_assignees || []).map((a) => staffColor(a.staff_id) + "2e");
   if (!cols.length) return "#f4f6f8";
   if (cols.length === 1) return cols[0];
@@ -1416,9 +1434,92 @@ function wmHTML(t) {
   const co = (t.task_companies || [])[0];
   if (!co) return "";
   const name = esc(companyName(co.company_id));
-  if (t.status === "canceled") return `<div class="tcard-wm"><span style="color:#9aa3ab">${name}</span></div>`;
-  if (t.status === "done") return `<div class="tcard-wm"><span style="color:var(--green)">${name}</span></div>`;
+  if (t.status === "canceled" || t.status === "done") return `<div class="tcard-wm"><span style="color:#8f9aa3">${name}</span></div>`;
   return `<div class="tcard-wm"><span style="background:linear-gradient(to top, var(--green) 50%, #b9c2cb 50%);-webkit-background-clip:text;background-clip:text;color:transparent">${name}</span></div>`;
+}
+function taskStatusStampHTML(task) {
+  if (task?.status === "done") return `<div class="task-status-stamp done-stamp" aria-label="Done">DONE!</div>`;
+  if (task?.status === "canceled") return `<div class="task-status-stamp canceled-stamp" aria-label="Canceled">CANCELED</div>`;
+  return "";
+}
+
+
+function scheduleWorkboardColumnRefresh() {
+  if (workboardColumnRefreshTimer) clearTimeout(workboardColumnRefreshTimer);
+  workboardColumnRefreshTimer = setTimeout(() => {
+    if (currentView === "board") renderBoard();
+  }, 120);
+}
+
+function normalizeWorkboardColumns(rows, tasks = []) {
+  const cols = (rows || []).slice().sort((a, b) => Number(a.sort_order) - Number(b.sort_order));
+  let needed = cols.length || BOARD_DEFAULT_COLS;
+  (tasks || []).forEach((task) => {
+    if (!hasBoardPosition(task)) return;
+    needed = Math.max(needed, boardRawPosToCell(task).col + 1);
+  });
+  while (cols.length < needed) {
+    cols.push({ id: null, part: boardPart, name: `Column ${cols.length + 1}`, sort_order: cols.length, fallback: true });
+  }
+  return cols;
+}
+
+function canManageWorkboardColumns() {
+  return isManager() || isExec() || Boolean(ME?.is_admin);
+}
+
+function workboardAddColumnModal() {
+  openModal(`
+    <h3>Add Workboard column</h3>
+    <div class="field"><label>Column name</label><input id="wbColName" maxlength="60" placeholder="e.g. Kwangsub, Sumin, Completed projects" /></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="wbColSave">Add column</button></div>`);
+  $("#wbColName").focus();
+  $("#wbColSave").onclick = async () => {
+    const name = $("#wbColName").value.trim();
+    if (!name) return alert("Enter a column name.");
+    const { error } = await sb.rpc("create_workboard_column", { p_part: boardPart, p_name: name });
+    if (error) return alert("Column could not be added: " + error.message);
+    closeModal();
+    renderBoard();
+  };
+}
+
+function workboardRenameColumnModal(column) {
+  if (!column?.id) return alert("Run the latest Workboard SQL first.");
+  openModal(`
+    <h3>Rename column</h3>
+    <div class="field"><label>Column name</label><input id="wbColName" maxlength="60" value="${esc(column.name || "")}" /></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="wbColSave">Save</button></div>`);
+  $("#wbColName").focus();
+  $("#wbColSave").onclick = async () => {
+    const name = $("#wbColName").value.trim();
+    if (!name) return alert("Enter a column name.");
+    const { error } = await sb.rpc("rename_workboard_column", { p_column_id: Number(column.id), p_name: name });
+    if (error) return alert("Column could not be renamed: " + error.message);
+    closeModal();
+    renderBoard();
+  };
+}
+
+function workboardDeleteColumnModal(column) {
+  if (!column?.id) return alert("Run the latest Workboard SQL first.");
+  const targets = workboardColumns.filter((c) => c.id && Number(c.id) !== Number(column.id));
+  if (!targets.length) return alert("At least one column must remain.");
+  openModal(`
+    <h3>Delete “${esc(column.name)}”</h3>
+    <p style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">Cards in this column will be moved to the bottom of the selected column. Other columns shift left by one.</p>
+    <div class="field"><label>Move cards to</label><select id="wbMoveTarget">${targets.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
+    <div class="modal-actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="wbColDelete">Delete column</button></div>`);
+  $("#wbColDelete").onclick = async () => {
+    if (!confirm(`Delete the “${column.name}” column?`)) return;
+    const { error } = await sb.rpc("delete_workboard_column", {
+      p_column_id: Number(column.id),
+      p_move_to_column_id: Number($("#wbMoveTarget").value),
+    });
+    if (error) return alert("Column could not be deleted: " + error.message);
+    closeModal();
+    renderBoard();
+  };
 }
 
 async function renderBoard() {
@@ -1426,7 +1527,7 @@ async function renderBoard() {
   if (workboardChannelPart && workboardChannelPart !== boardPart) await stopWorkboardRealtime();
   const main = $("#main");
   main.innerHTML = `<div class="page-title">Workboard</div>
-    <div class="page-sub">Drag cards anywhere — the layout is shared. Watermark fill shows status: half = in progress, full green = done, gray = canceled. Card color = assignees' colors.</div>
+    <div class="page-sub">Drag cards between named columns. Dropping on a card pushes only that column downward. Hidden Done/Canceled cards still reserve their positions, so cards never overlap when filters are turned back on.</div>
     <div class="filterbar" style="align-items:center">
       <div class="seg">${PARTS.map((p) => `<button data-bpart="${esc(p.name)}" class="${boardPart === p.name ? "active" : ""}">${esc(p.name)}</button>`).join("")}</div>
       <div class="seg" style="margin-left:10px">
@@ -1443,6 +1544,7 @@ async function renderBoard() {
         <span class="board-live-dot"></span><span id="boardViewers" class="board-viewers"><span class="board-viewing-label">Realtime connecting…</span></span>
       </div>
       ${isManager() ? `<button class="btn ghost sm" id="btnColors">🎨 Member colors</button>` : ``}
+      ${canManageWorkboardColumns() ? `<button class="btn ghost sm" id="btnAddBoardCol">+ Column</button>` : ``}
       <button class="btn" id="btnNewTask">+ New task</button>
     </div>
     <div id="boardCanvas" class="board-canvas"><div class="empty">Loading...</div></div>`;
@@ -1458,14 +1560,20 @@ async function renderBoard() {
   $("#bCoFilter").onchange = (e) => { boardCoFilter = Number(e.target.value); renderBoard(); };
   $("#btnNewTask").onclick = () => taskModal();
   if ($("#btnColors")) $("#btnColors").onclick = () => memberColorsModal();
+  if ($("#btnAddBoardCol")) $("#btnAddBoardCol").onclick = () => workboardAddColumnModal();
 
-  const [{ data: tRaw }, { data: cRaw }] = await Promise.all([
+  const ensureColumns = await sb.rpc("ensure_workboard_columns", { p_part: boardPart });
+  if (ensureColumns.error) console.warn("Workboard column setup unavailable", ensureColumns.error);
+
+  const [{ data: tRaw }, { data: cRaw }, { data: colRaw, error: colError }] = await Promise.all([
     sb.from("tasks").select("*, task_assignees(staff_id), task_companies(company_id), task_contracts(contract_id)").eq("part", boardPart),
     sb.from("task_comments")
       .select("id,task_id,body,author_id,created_at,needs_ack,acked_by,acked_at")
       .order("created_at", { ascending: true }),
+    sb.from("workboard_columns").select("id,part,name,sort_order").eq("part", boardPart).order("sort_order"),
   ]);
   const allTasks = tRaw || [];
+  workboardColumns = normalizeWorkboardColumns(colError ? [] : colRaw, allTasks);
   let tasks = [...allTasks];
   const cmts = cRaw || [];
   const boardLayout = buildBoardLayout(allTasks);
@@ -1551,14 +1659,14 @@ async function renderBoard() {
     const over = t.due_date && t.status === "progress" && t.due_date < new Date().toISOString().slice(0, 10);
     const n = cmts.filter((c) => c.task_id === t.id);
     const pendingAck = n.filter((c) => c.needs_ack && !c.acked_by).length;
-    return `<div class="tcard ${t.status === "canceled" ? "dead" : ""} ${over ? "overdue" : ""}" draggable="true"
+    return `<div class="tcard ${t.status === "done" ? "is-done" : ""} ${t.status === "canceled" ? "dead is-canceled" : ""} ${over ? "overdue" : ""}" draggable="true"
       data-task="${t.id}" data-col="${cell.col}" data-row="${cell.row}"
       style="background:${cardBG(t)};position:absolute;left:${pos.x}px;top:${pos.y}px;width:${BOARD_CARD_W}px;height:${BOARD_CARD_H}px">
       ${wmHTML(t)}
+      ${taskStatusStampHTML(t)}
       <div class="tcard-top">
         <span style="display:flex;gap:5px;align-items:center">
           ${t.amount !== null && t.amount !== undefined && t.amount !== "" ? `<span class="imp mid" style="background:#e8f5ee;color:var(--green-dark)">${amountTxt(t.amount)}</span>` : ""}
-          ${t.status === "done" ? `<span class="imp low" style="background:#d9f7d9;color:var(--green-dark)">✔ DONE</span>` : ""}
         </span>
         ${t.due_date ? `<span class="due-chip ${over ? "over" : ""}">DUE ${fmtD(t.due_date).slice(5)}${over ? " ⚠" : ""}</span>` : ""}
       </div>
@@ -1573,12 +1681,27 @@ async function renderBoard() {
 
   let maxRow = 0;
   boardLayout.cells.forEach((cell) => { maxRow = Math.max(maxRow, cell.row); });
-  const surfaceW = BOARD_PAD * 2 + BOARD_COLS * BOARD_CARD_W + (BOARD_COLS - 1) * BOARD_GAP_X;
+  const surfaceW = BOARD_PAD * 2 + boardColumnCount() * BOARD_CARD_W + (boardColumnCount() - 1) * BOARD_GAP_X;
   const surfaceH = Math.max(560, BOARD_PAD * 2 + (maxRow + 1) * BOARD_CARD_H + maxRow * BOARD_GAP_Y + 120);
   $("#boardCanvas").style.minHeight = "0";
-  $("#boardCanvas").innerHTML = `<div id="boardGridSurface" class="board-grid-surface" style="width:${surfaceW}px;min-height:${surfaceH}px">
-    ${tasks.map(cardHTML).join("") || `<div class="empty" style="padding-top:60px">No tasks in ${esc(boardPart)}. Create the first one!</div>`}
+  const columnHeaders = workboardColumns.map((column, index) => `<div class="board-column-header" style="width:${BOARD_CARD_W}px">
+    <span class="board-column-title" title="${esc(column.name)}">${esc(column.name)}</span>
+    ${canManageWorkboardColumns() && column.id ? `<span class="board-column-actions"><button type="button" data-col-rename="${column.id}" title="Rename column">✎</button><button type="button" data-col-delete="${column.id}" title="Delete column">×</button></span>` : ""}
+  </div>`).join("");
+  $("#boardCanvas").innerHTML = `<div class="board-scroll-inner" style="width:${surfaceW}px">
+    <div class="board-column-headers" style="padding-left:${BOARD_PAD}px;padding-right:${BOARD_PAD}px;gap:${BOARD_GAP_X}px">${columnHeaders}</div>
+    <div id="boardGridSurface" class="board-grid-surface" style="width:${surfaceW}px;min-height:${surfaceH}px">
+      ${tasks.map(cardHTML).join("") || `<div class="empty" style="padding-top:60px">No tasks in ${esc(boardPart)}. Create the first one!</div>`}
+    </div>
   </div>`;
+  document.querySelectorAll("[data-col-rename]").forEach((button) => (button.onclick = (event) => {
+    event.stopPropagation();
+    workboardRenameColumnModal(workboardColumns.find((c) => Number(c.id) === Number(button.dataset.colRename)));
+  }));
+  document.querySelectorAll("[data-col-delete]").forEach((button) => (button.onclick = (event) => {
+    event.stopPropagation();
+    workboardDeleteColumnModal(workboardColumns.find((c) => Number(c.id) === Number(button.dataset.colDelete)));
+  }));
 
   // click → detail
   document.querySelectorAll("#boardGridSurface [data-task]").forEach((el) => (el.onclick = () => taskDetail(Number(el.dataset.task))));
@@ -1623,7 +1746,7 @@ async function renderBoard() {
     const sr = surface.getBoundingClientRect();
     const rawX = e.clientX - sr.left - dx;
     const rawY = e.clientY - sr.top - dy;
-    const targetCol = Math.max(0, Math.min(BOARD_COLS - 1, Math.round((rawX - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X))));
+    const targetCol = Math.max(0, Math.min(boardColumnCount() - 1, Math.round((rawX - BOARD_PAD) / (BOARD_CARD_W + BOARD_GAP_X))));
     const targetRow = Math.max(0, Math.round((rawY - BOARD_PAD) / (BOARD_CARD_H + BOARD_GAP_Y)));
 
     const currentCells = new Map();
@@ -1951,7 +2074,7 @@ function taskModal(edit = null) {
       <div class="field"><label>Due date (optional)</label><input type="date" id="tkDue" value="${edit?.due_date || ""}" /></div>
     </div>
     ${!edit ? `<div class="field"><label>Place in board column</label><select id="tkBoardCol">
-      ${Array.from({ length: BOARD_COLS }, (_, i) => `<option value="${i}">Column ${i + 1}</option>`).join("")}
+      ${Array.from({ length: boardColumnCount() }, (_, i) => `<option value="${i}">${esc(boardColumnName(i))}</option>`).join("")}
     </select><div style="font-size:11px;color:var(--ink-2);margin-top:4px">The new card is added at the bottom of this column. You can drag it later.</div></div>` : ""}
     ${edit ? `<div class="field"><label>Status</label><select id="tkSt">
       ${Object.entries(TASK_ST).map(([k, v]) => `<option value="${k}" ${edit?.status === k ? "selected" : ""}>${v}</option>`).join("")}</select></div>` : ""}
@@ -2043,8 +2166,9 @@ async function taskDetail(taskId) {
     <div class="modal-actions">
       ${canDelete ? `<button class="btn ghost" id="tkDel" style="color:var(--red)">Delete</button>` : ""}
       ${amInvolved ? `<button class="btn ghost" id="tkPlanBtn">📅 Create plan</button><button class="btn ghost" id="tkEdit">Edit</button>
-        ${t.status === "progress" ? `<button class="btn navy" id="tkDone">✔ Mark done</button>` : ""}
-        ${t.status === "done" ? `<button class="btn navy" id="tkReopen">↩ Reopen</button>` : ""}` : ""}
+        ${t.status === "progress" ? `<button class="btn ghost" id="tkCancel" style="color:#68737c">Cancel task</button><button class="btn navy" id="tkDone">✔ Mark done</button>` : ""}
+        ${t.status === "done" ? `<button class="btn navy" id="tkReopen">↩ Reopen</button>` : ""}
+        ${t.status === "canceled" ? `<button class="btn navy" id="tkRestore">↩ Restore</button>` : ""}` : ""}
       <button class="btn ${amInvolved ? "ghost" : ""}" onclick="closeModal()">Close</button>
     </div>`);
   document.querySelectorAll("[data-ack]").forEach((b) => (b.onclick = async () => {
@@ -2069,9 +2193,20 @@ async function taskDetail(taskId) {
     closeModal();
     showTaskUndoToast(taskId);
   };
+  if ($("#tkCancel")) $("#tkCancel").onclick = async () => {
+    if (!confirm("Cancel this task? It will stay in the same board position and can be restored later.")) return;
+    const { error } = await setWorkboardTaskStatus(taskId, "canceled");
+    if (error) return alert("Cancel failed: " + error.message);
+    closeModal();
+  };
   if ($("#tkReopen")) $("#tkReopen").onclick = async () => {
     const { error } = await setWorkboardTaskStatus(taskId, "progress");
     if (error) return alert("Reopen failed: " + error.message);
+    closeModal();
+  };
+  if ($("#tkRestore")) $("#tkRestore").onclick = async () => {
+    const { error } = await setWorkboardTaskStatus(taskId, "progress");
+    if (error) return alert("Restore failed: " + error.message);
     closeModal();
   };
   if ($("#tkDel")) $("#tkDel").onclick = async () => {
