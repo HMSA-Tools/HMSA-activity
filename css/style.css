@@ -268,8 +268,8 @@ tr.clickable:hover { background: #f7fafc; cursor: pointer; }
 .tcard { position: relative; overflow: hidden; border-radius: 10px; border: 1.5px solid rgba(0,0,0,.08); padding: 10px 12px; margin-bottom: 10px; cursor: pointer; box-shadow: 0 1px 3px rgba(10,42,67,.08); transition: transform .1s, box-shadow .1s; }
 .tcard:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(10,42,67,.14); }
 .tcard.overdue { border: 2px solid var(--red); }
-.tcard.dead { background: #e9ecef !important; filter: grayscale(1); opacity: .65; }
-.tcard.dead .tcard-title { text-decoration: line-through; color: #6c757d; }
+.tcard.dead { background: #e4e7ea !important; filter: grayscale(.85); opacity: .84; }
+.tcard.dead .tcard-title { text-decoration: none; color: #68737c; }
 .tcard-wm { position: absolute; right: -4px; bottom: -8px; font-size: 30px; font-weight: 900; opacity: .07; pointer-events: none; white-space: nowrap; }
 .tcard-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; gap: 6px; }
 .tcard-title { font-weight: 700; font-size: 13.5px; line-height: 1.35; margin-bottom: 7px; }
@@ -1056,4 +1056,131 @@ button.wb-comment-check {
 @media (max-width: 760px) {
   .board-realtime-status { order: 20; width: 100%; max-width: none; margin-left: 0 !important; }
   .workboard-event-toast { right: 14px; bottom: 14px; max-width: calc(100vw - 28px); }
+}
+
+
+/* ===== Workboard dynamic columns + strong Done/Canceled stamps ===== */
+.board-scroll-inner {
+  min-width: max-content;
+}
+.board-column-headers {
+  box-sizing: border-box;
+  display: flex;
+  align-items: stretch;
+  min-height: 42px;
+  padding-top: 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(148, 163, 184, .2);
+  background: #f7fafb;
+}
+.board-column-header {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(148, 163, 184, .28);
+  border-radius: 8px;
+  background: rgba(255,255,255,.88);
+  color: #2a3f4d;
+  box-shadow: 0 1px 2px rgba(15,23,42,.04);
+}
+.board-column-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: .2px;
+}
+.board-column-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+.board-column-actions button {
+  width: 23px;
+  height: 23px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #768491;
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+}
+.board-column-actions button:hover {
+  background: #edf2f5;
+  color: #223746;
+}
+.board-grid-surface .tcard.is-done {
+  background: #eef0ef !important;
+  border-color: rgba(111, 124, 117, .35);
+  filter: none;
+}
+.board-grid-surface .tcard.is-canceled {
+  background: #e4e7ea !important;
+  border-color: rgba(107, 114, 128, .35);
+  filter: grayscale(.9);
+  opacity: .84;
+}
+.board-grid-surface .tcard.is-done .tcard-title,
+.board-grid-surface .tcard.is-canceled .tcard-title {
+  position: relative;
+  z-index: 4;
+}
+.board-grid-surface .tcard.is-done .tcard-top,
+.board-grid-surface .tcard.is-done .tcard-assignees,
+.board-grid-surface .tcard.is-done .tcard-foot,
+.board-grid-surface .tcard.is-canceled .tcard-top,
+.board-grid-surface .tcard.is-canceled .tcard-assignees,
+.board-grid-surface .tcard.is-canceled .tcard-foot {
+  position: relative;
+  z-index: 4;
+}
+.task-status-stamp {
+  position: absolute;
+  z-index: 5;
+  right: 10px;
+  bottom: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 112px;
+  padding: 3px 10px 2px;
+  border: 4px double currentColor;
+  border-radius: 7px;
+  transform: rotate(-11deg);
+  transform-origin: center;
+  font-family: Arial Black, Impact, system-ui, sans-serif;
+  font-size: 33px;
+  font-weight: 950;
+  line-height: 1;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  mix-blend-mode: multiply;
+}
+.task-status-stamp.done-stamp {
+  color: rgba(190, 35, 42, .48);
+}
+.task-status-stamp.canceled-stamp {
+  right: 6px;
+  min-width: 154px;
+  color: rgba(82, 91, 101, .52);
+  font-size: 24px;
+  letter-spacing: .5px;
+}
+.board-grid-surface .tcard.remote-held .task-status-stamp {
+  z-index: 5;
+}
+@media (max-width: 760px) {
+  .task-status-stamp { font-size: 29px; min-width: 100px; }
+  .task-status-stamp.canceled-stamp { font-size: 21px; min-width: 140px; }
 }
